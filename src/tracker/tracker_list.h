@@ -12,14 +12,14 @@ struct TestTrackerListWrapper;
 
 namespace torrent {
 
-// The tracker list will contain a list of tracker, divided into
-// subgroups. Each group must be randomized before we start. When
-// starting the tracker request, always start from the beginning and
-// iterate if the request failed. Upon request success move the
-// tracker to the beginning of the subgroup and start from the
+// The tracker list will contain a list of tracker, divided into subgroups. Each group must be
+// randomized before we start.
+//
+// When starting the tracker request, always start from the beginning and iterate if the request
+// failed.
+//
+// Upon request success move the tracker to the beginning of the subgroup and start from the
 // beginning of the whole list.
-
-// TODO: Use tracker::Tracker non-pointer, change slots, etc into using TrackerWorker*.
 
 class LIBTORRENT_EXPORT TrackerList : private std::vector<tracker::Tracker> {
 public:

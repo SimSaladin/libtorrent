@@ -60,7 +60,7 @@ Manager::remove_controller(TrackerControllerWrapper controller) {
     throw internal_error("tracker::Manager::remove_controller(...) controller not found or has multiple references.");
 
   for (auto& tracker : *controller.get()->tracker_list())
-    remove_events(tracker.get_worker());
+    remove_tracker_task(tracker.get_worker());
 
   LT_LOG_TRACKER_EVENTS("removed controller: info_hash:%s", hash_string_to_hex_str(controller.info_hash()).c_str());
 }
@@ -81,14 +81,13 @@ Manager::send_scrape(tracker::Tracker& tracker) {
   tracker.get_worker()->send_scrape();
 }
 
-// Events are queued by the trackers and run in the main thread.
 void
-Manager::add_event(torrent::TrackerWorker* tracker_worker, std::function<void()> event) {
-  m_main_thread->callback(tracker_worker, std::move(event));
+Manager::add_tracker_task(torrent::TrackerWorker* tracker_worker, std::function<void()> task) {
+  m_tracker_thread->callback(tracker_worker, std::move(task));
 }
 
 void
-Manager::remove_events(torrent::TrackerWorker* tracker_worker) {
+Manager::remove_tracker_task(torrent::TrackerWorker* tracker_worker) {
   m_main_thread->cancel_callback_and_wait(tracker_worker);
   m_tracker_thread->cancel_callback_and_wait(tracker_worker);
 }
