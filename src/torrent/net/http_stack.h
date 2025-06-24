@@ -14,8 +14,6 @@ public:
   HttpStack(utils::Thread* thread);
   ~HttpStack();
 
-  void                shutdown();
-
   void                start_get(HttpGet& http_get);
 
   unsigned int        active() const;
@@ -45,6 +43,9 @@ public:
 
 protected:
   friend class HttpGet;
+  friend class ThreadNet;
+
+  void                shutdown();
 
   CurlStack*          curl_stack() { return m_stack.get(); }
 

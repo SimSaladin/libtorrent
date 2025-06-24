@@ -40,8 +40,13 @@ public:
     statistics_type(const Rate& up, const Rate& down) : up_rate(up), down_rate(down) { }
   };
 
-  DhtController();
+  DhtController(utils::Thread* owner_thread);
   ~DhtController();
+
+  void                initialize(const Object& dht_cache, const sockaddr* bind_address);
+
+  bool                start(uint16_t port);
+  void                stop();
 
   // Thread-safe:
 
@@ -55,11 +60,6 @@ public:
 
   // Main thread:
 
-  void                initialize(const Object& dhtCache);
-
-  bool                start(uint16_t port);
-  void                stop();
-
   // Store DHT cache in the given container and return the container.
   Object*             store_cache(Object* container);
 
@@ -68,6 +68,7 @@ public:
   void                add_node(const std::string& host, int port);
   void                add_node(const sockaddr* sa, int port);
 
+  // TODO: Use interrupt callback.
   statistics_type     get_statistics() const;
   void                reset_statistics();
 
@@ -75,17 +76,24 @@ public:
   void                set_download_throttle(Throttle* t);
 
 protected:
-  friend class torrent::TrackerDht;
+  friend class TrackerDht;
+  friend class ThreadTracker;
 
-  // Thread-safe:
+  void                shutdown();
 
   void                announce(const HashString& info_hash, TrackerDht* tracker);
   void                cancel_announce(const HashString* info_hash, const torrent::TrackerDht* tracker);
 
 private:
-  std::mutex          m_lock;
+  utils::Thread*      m_owner_thread{};
+
+  mutable std::mutex  m_lock;
+
   uint16_t            m_port{0};
+  bool                m_active{false};
   bool                m_receive_requests{true};
+
+  // TODO: Review access to m_router, no need to lock if only accessed from the owner thread.
 
   std::unique_ptr<DhtRouter> m_router;
 };

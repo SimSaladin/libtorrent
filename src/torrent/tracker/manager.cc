@@ -83,7 +83,8 @@ Manager::send_scrape(tracker::Tracker& tracker) {
 
 void
 Manager::add_tracker_task(torrent::TrackerWorker* tracker_worker, std::function<void()> task) {
-  m_tracker_thread->callback(tracker_worker, std::move(task));
+  // TODO: Currently executing in main thread, but should be in tracker thread.
+  m_main_thread->callback(tracker_worker, std::move(task));
 }
 
 void

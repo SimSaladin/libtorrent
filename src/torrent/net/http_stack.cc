@@ -20,11 +20,6 @@ HttpStack::HttpStack(utils::Thread* thread) :
 HttpStack::~HttpStack() = default;
 
 void
-HttpStack::shutdown() {
-  m_stack->shutdown();
-}
-
-void
 HttpStack::start_get(HttpGet& http_get) {
   if (!http_get.is_valid())
     throw torrent::internal_error("HttpStack::start_get() called with an invalid HttpGet object.");
@@ -134,6 +129,11 @@ HttpStack::dns_timeout() const {
 void
 HttpStack::set_dns_timeout(long timeout) {
   m_stack->set_dns_timeout(timeout);
+}
+
+void
+HttpStack::shutdown() {
+  m_stack->shutdown();
 }
 
 } // namespace torrent::net
