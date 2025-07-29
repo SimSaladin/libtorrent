@@ -8,6 +8,8 @@
 
 namespace torrent {
 
+TrackerWorker::~TrackerWorker() = default;
+
 // TODO: Refactor this to return a struct containing bind/local ip, etc.
 // TODO: Have separate prefer-local ip protocol, and detect local ipv6 address handling.
 
