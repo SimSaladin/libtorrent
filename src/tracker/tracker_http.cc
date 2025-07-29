@@ -47,6 +47,11 @@ TrackerHttp::~TrackerHttp() {
   this_thread::scheduler()->erase(&m_delay_scrape);
 }
 
+tracker_enum
+TrackerHttp::type() const {
+  return TRACKER_HTTP;
+}
+
 bool
 TrackerHttp::is_busy() const {
   return m_data != nullptr;
@@ -141,9 +146,13 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
   m_data = std::make_unique<std::stringstream>();
   m_get.reset(request_url, m_data);
 
+  // TODO: Add retry logic, so we start with normal_ip_preference.
+
   switch (fallback_ip_preference()) {
   case TrackerWorker::IP_NONE:
-    throw torrent::internal_error("Cannot send tracker event, both IPv4 and IPv6 are blocked.");
+    this_thread::callback(static_cast<TrackerWorker*>(this), [this] {
+      receive_failed("Cannot send tracker event, both IPv4 and IPv6 are blocked.");
+    });
   case TrackerWorker::IP_USE_V4:
     m_get.use_ipv4();
     break;
@@ -222,11 +231,6 @@ TrackerHttp::close() {
   m_requested_scrape = false;
 
   close_directly();
-}
-
-tracker_enum
-TrackerHttp::type() const {
-  return TRACKER_HTTP;
 }
 
 void

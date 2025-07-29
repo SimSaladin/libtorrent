@@ -64,6 +64,8 @@ TrackerUdp::send_event(tracker::TrackerState::event_enum new_state) {
       (this_thread::cached_time() - m_time_last_resolved) > 24h ||
       m_failed_since_last_resolved > 3) {
 
+    // TODO: Should this be optimized in cases where either ipv4/6 is blocked?
+
     // Currently discarding SOCK_DGRAM filter.
     this_thread::resolver()->resolve_both(static_cast<TrackerWorker*>(this), hostname.data(), AF_UNSPEC,
                                           [this](c_sin_shared_ptr sin, c_sin6_shared_ptr sin6, int err) {
@@ -201,29 +203,35 @@ TrackerUdp::start_announce() {
 
   m_sending_announce = false;
 
-  // TODO: Properly select preferred protocol and on failure try the other one.
+  // TODO: Add retry logic, so we start with normal_ip_preference.
 
-  // TODO: All tracker types should have a mode where they try the preferred protocol, and if the
-  // torrent doesn't start downloading the tracker controller sets a flag and they all try the other
-  // protocol.
+  // TODO: Add logic for initial connection, retries, and fallback IP preference.
+  // TODO: State/counters should be passed to an ip_preference function that selects the current preference.
 
-  // bool is_block_ipv4 = manager->connection_manager()->is_block_ipv4();
-  // bool is_block_ipv6 = manager->connection_manager()->is_block_ipv6();
-  // bool is_prefer_ipv6 = manager->connection_manager()->is_prefer_ipv6();
+  // !!! TODO: First make bind_address part of of ip_preference, make TrackerHttp respect it.
+  //
+  //           We should make TrackerHttp always use our own custom ip_preference logic to ensure
+  //           tracker request failures don't result in us sending ipv6 requests when we don't want
+  //           to?
 
-  // if (is_block_ipv4 && is_block_ipv6) {
-  //   LT_LOG("could not resolve hostname : both IPv4 and IPv6 are blocked", 0);
-  //   return receive_failed("could not resolve hostname : both IPv4 and IPv6 are blocked");
+  // switch (fallback_ip_preference()) {
+  // case TrackerWorker::IP_NONE:
+  //   return receive_failed("Cannot send tracker event, both IPv4 and IPv6 are blocked.");
+  // case TrackerWorker::IP_USE_V4:
+  //   m_get.use_ipv4();
+  //   break;
+  // case TrackerWorker::IP_USE_V6:
+  //   m_get.use_ipv6();
+  //   break;
+  // case TrackerWorker::IP_PREFER_V4:
+  //   // m_get.prefer_ipv4();
+  //   break;
+  // case TrackerWorker::IP_PREFER_V6:
+  //   m_get.prefer_ipv6();
+  //   break;
+  // case TrackerWorker::IP_EITHER:
+  //   break;
   // }
-
-  // if (m_inet_address == nullptr && m_inet6_address == nullptr) {
-  //   LT_LOG("could not resolve hostname : no valid addresses found since either IPv4 or IPv6 is blocked", 0);
-  //   return receive_failed("could not resolve hostname : no valid addresses found since either IPv4 or IPv6 is blocked");
-  // }
-
-  // Use prefer ipv6.
-
-
 
   if (m_inet_address != nullptr)
     m_current_address = reinterpret_cast<sockaddr*>(m_inet_address.get());
@@ -239,6 +247,8 @@ TrackerUdp::start_announce() {
     LT_LOG("could not open UDP socket", 0);
     return receive_failed("could not open UDP socket");
   }
+
+  // TODO: We need separate ipv4/6 bind addresses.
 
   auto bind_address = rak::socket_address::cast_from(manager->connection_manager()->bind_address());
 
