@@ -160,18 +160,18 @@ TrackerUdp::receive_resolved(c_sin_shared_ptr& sin, c_sin6_shared_ptr& sin6, int
     return receive_failed("could not resolve hostname : error:'" + std::string(gai_strerror(err)) + "'");
   }
 
-  if (sin != nullptr) {
+  if (sin == nullptr) {
+    m_inet_address = nullptr;
+  } else {
     m_inet_address = sin_copy(sin.get());
     sa_set_port(reinterpret_cast<sockaddr*>(m_inet_address.get()), m_port);
-  } else {
-    m_inet_address = nullptr;
   }
 
-  if (sin6 != nullptr) {
+  if (sin6 == nullptr) {
+    m_inet6_address = nullptr;
+  } else {
     m_inet6_address = sin6_copy(sin6.get());
     sa_set_port(reinterpret_cast<sockaddr*>(m_inet6_address.get()), m_port);
-  } else {
-    m_inet6_address = nullptr;
   }
 
   m_time_last_resolved = this_thread::cached_time();
@@ -202,6 +202,28 @@ TrackerUdp::start_announce() {
   m_sending_announce = false;
 
   // TODO: Properly select preferred protocol and on failure try the other one.
+
+  // TODO: All tracker types should have a mode where they try the preferred protocol, and if the
+  // torrent doesn't start downloading the tracker controller sets a flag and they all try the other
+  // protocol.
+
+  // bool is_block_ipv4 = manager->connection_manager()->is_block_ipv4();
+  // bool is_block_ipv6 = manager->connection_manager()->is_block_ipv6();
+  // bool is_prefer_ipv6 = manager->connection_manager()->is_prefer_ipv6();
+
+  // if (is_block_ipv4 && is_block_ipv6) {
+  //   LT_LOG("could not resolve hostname : both IPv4 and IPv6 are blocked", 0);
+  //   return receive_failed("could not resolve hostname : both IPv4 and IPv6 are blocked");
+  // }
+
+  // if (m_inet_address == nullptr && m_inet6_address == nullptr) {
+  //   LT_LOG("could not resolve hostname : no valid addresses found since either IPv4 or IPv6 is blocked", 0);
+  //   return receive_failed("could not resolve hostname : no valid addresses found since either IPv4 or IPv6 is blocked");
+  // }
+
+  // Use prefer ipv6.
+
+
 
   if (m_inet_address != nullptr)
     m_current_address = reinterpret_cast<sockaddr*>(m_inet_address.get());

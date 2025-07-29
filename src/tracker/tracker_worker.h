@@ -52,6 +52,8 @@ protected:
   friend class tracker::Tracker;
   friend class ::TrackerTest;
 
+  // TODO: After renaming to *_unsafe, these should remove the lock_and_*.
+
   void                lock_and_clear_intervals();
   void                lock_and_clear_stats();
   void                lock_and_set_latest_event(tracker::TrackerState::event_enum new_state);
@@ -60,7 +62,21 @@ protected:
   auto                lock_guard() const                    { return std::scoped_lock(m_mutex); }
   void                unlock() const                        { m_mutex.unlock(); }
 
-  // Protected members that require locking:
+  // TODO: Create an ip_preference struct, contains bind/local, etc
+
+  enum ip_type {
+    IP_NONE,
+    IP_EITHER,
+    IP_USE_V4,
+    IP_USE_V6,
+    IP_PREFER_V4,
+    IP_PREFER_V6,
+  };
+
+  ip_type             normal_ip_preference();
+  ip_type             fallback_ip_preference();
+
+  // Protected members that require locking: (rename to *_unsafe)
 
   virtual bool        is_busy() const = 0;
   virtual bool        is_usable() const                     { return m_state.is_enabled(); }

@@ -9,6 +9,7 @@
 #include <utility>
 #include <rak/string_manip.h>
 
+#include "manager.h"
 #include "net/address_list.h"
 #include "torrent/connection_manager.h"
 #include "torrent/exceptions.h"
@@ -19,8 +20,6 @@
 #include "torrent/utils/log.h"
 #include "torrent/utils/option_strings.h"
 #include "torrent/utils/uri_parser.h"
-
-#include "manager.h"
 
 #define LT_LOG(log_fmt, ...)                                            \
   lt_log_print_hash(LOG_TRACKER_REQUESTS, info().info_hash, "tracker_http", "%p : " log_fmt, static_cast<TrackerWorker*>(this), __VA_ARGS__);
@@ -137,28 +136,29 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
     break;
   }
 
-  m_data = std::make_unique<std::stringstream>();
-
   std::string request_url = s.str();
 
+  m_data = std::make_unique<std::stringstream>();
   m_get.reset(request_url, m_data);
 
-  bool is_block_ipv4 = manager->connection_manager()->is_block_ipv4();
-  bool is_block_ipv6 = manager->connection_manager()->is_block_ipv6();
-  bool is_prefer_ipv6 = manager->connection_manager()->is_prefer_ipv6();
-
-  // If both IPv4 and IPv6 are blocked, we cannot send the request.
-  //
-  // TODO: Properly handle this case without throwing an error.
-
-  if (is_block_ipv4 && is_block_ipv6)
+  switch (fallback_ip_preference()) {
+  case TrackerWorker::IP_NONE:
     throw torrent::internal_error("Cannot send tracker event, both IPv4 and IPv6 are blocked.");
-  else if (is_block_ipv4)
-    m_get.use_ipv6();
-  else if (is_block_ipv6)
+  case TrackerWorker::IP_USE_V4:
     m_get.use_ipv4();
-  else if (is_prefer_ipv6)
+    break;
+  case TrackerWorker::IP_USE_V6:
+    m_get.use_ipv6();
+    break;
+  case TrackerWorker::IP_PREFER_V4:
+    // m_get.prefer_ipv4();
+    break;
+  case TrackerWorker::IP_PREFER_V6:
     m_get.prefer_ipv6();
+    break;
+  case TrackerWorker::IP_EITHER:
+    break;
+  }
 
   LT_LOG_DUMP(request_url.c_str(), request_url.size(),
               "sending event : state:%s up_adj:%" PRIu64 " completed_adj:%" PRIu64 " left_adj:%" PRIu64,

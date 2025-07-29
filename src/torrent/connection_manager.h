@@ -121,6 +121,8 @@ public:
   // For internal usage.
   Listen*             listen()            { return m_listen; }
 
+  // TODO: Tracker controller should prefer pure ipv6 over ipv4in6.
+
   bool                is_block_ipv4() const    { return m_block_ipv4; }
   bool                is_block_ipv6() const    { return m_block_ipv6; }
   bool                is_block_ipv4in6() const { return m_block_ipv4in6; }
