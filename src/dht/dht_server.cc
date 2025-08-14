@@ -173,9 +173,9 @@ DhtServer::reset_statistics() {
 void
 DhtServer::ping(const HashString& id, const rak::socket_address* sa) {
   // No point pinging a node that we're already contacting otherwise.
-  auto itr = m_transactions.lower_bound(DhtTransaction::key(sa, 0));
-  if (itr == m_transactions.end() || !DhtTransaction::key_match(itr->first, sa))
-    add_transaction(new DhtTransactionPing(id, sa), packet_prio_low);
+  auto itr = m_transactions.lower_bound(DhtTransaction::key(sa->c_sockaddr(), 0));
+  if (itr == m_transactions.end() || !DhtTransaction::key_match(itr->first, sa->c_sockaddr()))
+    add_transaction(new DhtTransactionPing(id, sa->c_sockaddr()), packet_prio_low);
 }
 
 // Contact nodes in given bucket and ask for their nodes closest to target.
@@ -323,7 +323,7 @@ DhtServer::create_announce_peer_response(const DhtMessage& req, const rak::socke
 void
 DhtServer::process_response(const HashString& id, const rak::socket_address* sa, const DhtMessage& response) {
   int  transactionId = static_cast<unsigned char>(response[key_t].as_raw_string().data()[0]);
-  auto itr = m_transactions.find(DhtTransaction::key(sa, transactionId));
+  auto itr = m_transactions.find(DhtTransaction::key(sa->c_sockaddr(), transactionId));
 
   // Response to a transaction we don't have in our table. At this point it's
   // impossible to tell whether it used to be a valid transaction but timed out
@@ -340,7 +340,7 @@ DhtServer::process_response(const HashString& id, const rak::socket_address* sa,
   try {
     DhtTransaction* transaction = itr->second;
 #ifdef USE_EXTRA_DEBUG
-    if (DhtTransaction::key(sa, transactionId) != transaction->key(transactionId))
+    if (DhtTransaction::key(sa->c_sockaddr(), transactionId) != transaction->key(transactionId))
       throw internal_error("DhtServer::process_response key mismatch.");
 #endif
 
@@ -383,7 +383,7 @@ DhtServer::process_response(const HashString& id, const rak::socket_address* sa,
 void
 DhtServer::process_error(const rak::socket_address* sa, const DhtMessage& error) {
   int  transactionId = static_cast<unsigned char>(error[key_t].as_raw_string().data()[0]);
-  auto itr = m_transactions.find(DhtTransaction::key(sa, transactionId));
+  auto itr = m_transactions.find(DhtTransaction::key(sa->c_sockaddr(), transactionId));
 
   if (itr == m_transactions.end())
     return;
@@ -560,7 +560,7 @@ DhtServer::create_response(const DhtMessage& req, const rak::socket_address* sa,
   reply[key_y] = raw_bencode::from_c_str("1:r");
   reply[key_v] = raw_bencode("4:" PEER_VERSION, 6);
 
-  add_packet(new DhtTransactionPacket(sa, reply), packet_prio_reply);
+  add_packet(new DhtTransactionPacket(sa->c_sockaddr(), reply), packet_prio_reply);
 }
 
 void
@@ -575,7 +575,7 @@ DhtServer::create_error(const DhtMessage& req, const rak::socket_address* sa, in
   error[key_e_0] = num;
   error[key_e_1] = raw_string::from_c_str(msg);
 
-  add_packet(new DhtTransactionPacket(sa, error), packet_prio_reply);
+  add_packet(new DhtTransactionPacket(sa->c_sockaddr(), error), packet_prio_reply);
 }
 
 int
@@ -613,7 +613,7 @@ DhtServer::add_transaction(DhtTransaction* transaction, int priority) {
   // We know where to insert it, so pass that as hint.
   insertItr = m_transactions.insert(insertItr, std::make_pair(transaction->key(id), transaction));
 
-  create_query(insertItr, id, transaction->address(), priority);
+  create_query(insertItr, id, rak::socket_address::cast_from(transaction->address()), priority);
 
   start_write();
 
@@ -633,7 +633,7 @@ DhtServer::failed_transaction(transaction_itr itr, bool quick) {
   // Finally, if we haven't received anything whatsoever so far, assume the entire
   // network is down and so we can't blame the node either.
   if (!quick && m_networkUp && transaction->packet() == NULL && transaction->id() != torrent::DhtRouter::zero_id)
-    m_router->node_inactive(transaction->id(), transaction->address());
+    m_router->node_inactive(transaction->id(), rak::socket_address::cast_from(transaction->address()));
 
   if (transaction->type() == DhtTransaction::DHT_FIND_NODE) {
     if (quick)
@@ -822,7 +822,7 @@ DhtServer::process_queue(packet_queue& queue, uint32_t* quota) {
     queue.pop_front();
 
     try {
-      int written = write_datagram(packet->c_str(), packet->length(), packet->address());
+      int written = write_datagram(packet->c_str(), packet->length(), rak::socket_address::cast_from(packet->address()));
 
       if (written == -1)
         throw network_error();

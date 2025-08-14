@@ -68,6 +68,8 @@ c_sin6_unique_ptr sin6_from_c_sa(c_sa_unique_ptr sap) LIBTORRENT_EXPORT;
 
 void        sa_clear_inet6(sockaddr_in6* sa) LIBTORRENT_EXPORT;
 
+in_addr     sa_sin_addr(const sockaddr* sa) LIBTORRENT_EXPORT;
+
 uint16_t    sa_port(const sockaddr* sa) LIBTORRENT_EXPORT;
 void        sa_set_port(sockaddr* sa, uint16_t port) LIBTORRENT_EXPORT;
 

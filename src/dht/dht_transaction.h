@@ -260,7 +260,7 @@ public:
   key_type                    key(int id) const    { return key(m_sa.get(), id); }
 
   static key_type             key(const sockaddr* sa, int id);
-  static bool                 key_match(key_type key, const rak::socket_address* sa);
+  static bool                 key_match(key_type key, const sockaddr* sa);
 
   // Node ID and address.
   const HashString&           id()                      { return m_id; }
@@ -385,16 +385,6 @@ DhtSearch::set_node_active(const std::unique_ptr<DhtNode>& n, bool active) {
 inline bool
 dht_compare_closer::operator () (const std::unique_ptr<DhtNode>& one, const std::unique_ptr<DhtNode>& two) const {
   return DhtSearch::is_closer(*one, *two, m_target);
-}
-
-inline DhtTransaction::key_type
-DhtTransaction::key(const sockaddr* sa, int id) {
-  return (static_cast<uint64_t>(sa->sa_inet()->address_n()) << 32) + id;
-}
-
-inline bool
-DhtTransaction::key_match(key_type key, const rak::socket_address* sa) {
-  return (key >> 32) == sa->sa_inet()->address_n();
 }
 
 // These could (should?) check that the type matches, or use dynamic_cast if we have RTTI.

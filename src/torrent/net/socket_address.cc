@@ -381,6 +381,14 @@ sa_clear_inet6(sockaddr_in6* sa) {
   sa->sin6_family = AF_INET6;
 }
 
+in_addr
+sa_sin_addr(const sockaddr* sa) {
+  if (!sa_is_inet(sa))
+    throw internal_error("torrent::sa_sin_addr_n: sockaddr is not inet");
+
+  return reinterpret_cast<const sockaddr_in*>(sa)->sin_addr;
+}
+
 uint16_t
 sa_port(const sockaddr* sa) {
   if (sa == NULL)
