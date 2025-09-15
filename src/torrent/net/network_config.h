@@ -88,6 +88,8 @@ public:
 
   c_sa_shared_ptr     local_address() const;
   std::string         local_address_str() const;
+  c_sin6_shared_ptr   local_address_in6() const; // NEW
+  std::string         local_address_in6_str() const; // NEW
   c_sa_shared_ptr     proxy_address() const;
   std::string         proxy_address_str() const;
 
@@ -98,6 +100,7 @@ public:
   void                set_bind_inet_address(const sockaddr* sa);
   void                set_bind_inet6_address(const sockaddr* sa);
   void                set_local_address(const sockaddr* sa);
+  void                set_local_address_in6(const sockaddr_in6* sa);
   void                set_proxy_address(const sockaddr* sa);
 
   // Port number should not be cleared as it is used for tracker announces.
@@ -144,6 +147,7 @@ private:
   c_sa_shared_ptr     m_bind_inet_address;
   c_sa_shared_ptr     m_bind_inet6_address;
   c_sa_shared_ptr     m_local_address;
+  c_sin6_shared_ptr   m_local_address_in6;
   c_sa_shared_ptr     m_proxy_address;
 
   uint16_t            m_listen_port{0};

@@ -586,7 +586,7 @@ TrackerController::receive_failure(const tracker::Tracker& tracker, const std::s
       success_counter = state.success_counter();
     });
 
-  if (failed_counter == 1 && success_counter > 0)
+  if (failed_counter >= 1 && success_counter > 0)
     m_flags |= flag_failure_mode;
 
   do_timeout();

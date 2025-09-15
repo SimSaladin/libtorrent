@@ -394,8 +394,12 @@ TrackerList::receive_success(tracker::Tracker tracker, AddressList* l) {
   if (itr == end())
     throw internal_error("TrackerList::receive_success(...) called but the iterator is invalid.");
 
+  auto n = 0;
+
+  /* NEW doesn't work anymore
   if (tracker.is_busy())
     throw internal_error("TrackerList::receive_success(...) called but the tracker is still busy.");
+  */
 
   // Promote the tracker to the front of the group since it was
   // successfull.
@@ -407,10 +411,26 @@ TrackerList::receive_success(tracker::Tracker tracker, AddressList* l) {
 
   {
     auto guard = tracker.get_worker()->lock_guard();
+
+    n = tracker.get_worker()->state().m_multipart_event_index++;
+    if (n >= tracker.get_worker()->state().m_multipart_event_num) {
+        n = 0;
+        tracker.get_worker()->state().m_multipart_event_index = 1;
+    }
+    if (n == 0) { // reset
+        tracker.get_worker()->state().m_failed_counter = 0;
+        tracker.get_worker()->state().m_latest_sum_peers = 0;
+        tracker.get_worker()->state().m_latest_new_peers = 0;
+    }
+
     tracker.get_worker()->state().m_success_time_last = this_thread::cached_seconds().count();
     tracker.get_worker()->state().m_success_counter++;
-    tracker.get_worker()->state().m_failed_counter = 0;
-    tracker.get_worker()->state().m_latest_sum_peers = l->size();
+    tracker.get_worker()->state().m_latest_sum_peers += l->size();
+
+    tracker.get_worker()->state().m_success_time_last_array[n] = this_thread::cached_seconds().count();
+    tracker.get_worker()->state().m_success_counter_array[n]++;
+    tracker.get_worker()->state().m_failed_counter_array[n] = 0;
+    tracker.get_worker()->state().m_latest_sum_peers_array[n] = l->size();
   }
 
   if (!m_slot_success)
@@ -420,7 +440,9 @@ TrackerList::receive_success(tracker::Tracker tracker, AddressList* l) {
 
   {
     auto guard = tracker.get_worker()->lock_guard();
-    tracker.get_worker()->state().m_latest_new_peers = new_peers;
+    tracker.get_worker()->state().m_latest_new_peers += new_peers;
+
+    tracker.get_worker()->state().m_latest_new_peers_array[n] = new_peers; // NEW
   }
 }
 
@@ -434,13 +456,23 @@ TrackerList::receive_failed(tracker::Tracker tracker, const std::string& msg) {
   if (itr == end())
     throw internal_error("TrackerList::receive_failed(...) called but the iterator is invalid.");
 
+  /* NEW doesn't work anymore...
   if (tracker.is_busy())
     throw internal_error("TrackerList::receive_failed(...) called but the tracker is still busy.");
+  */
 
   {
     auto guard = tracker.get_worker()->lock_guard();
     tracker.get_worker()->state().m_failed_time_last = this_thread::cached_seconds().count();
     tracker.get_worker()->state().m_failed_counter++;
+
+    auto n = tracker.get_worker()->state().m_multipart_event_index++;
+    if (n >= tracker.get_worker()->state().m_multipart_event_num) {
+        n = 0;
+        tracker.get_worker()->state().m_multipart_event_index = 1;
+    }
+    tracker.get_worker()->state().m_failed_time_last_array[n] = this_thread::cached_seconds().count();
+    tracker.get_worker()->state().m_failed_counter_array[n]++;
   }
 
   if (m_slot_failed)

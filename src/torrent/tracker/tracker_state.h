@@ -26,9 +26,9 @@ public:
     EVENT_SCRAPE
   };
 
-  static constexpr int flag_enabled       = 0x1;
-  static constexpr int flag_extra_tracker = 0x2;
-  static constexpr int flag_scrapable     = 0x4;
+  static constexpr int flag_enabled               = 0x1;
+  static constexpr int flag_extra_tracker         = 0x2;
+  static constexpr int flag_scrapable             = 0x4;
 
   // TODO: Remove these:
   // static constexpr int max_flag_size   = 0x10;
@@ -62,7 +62,7 @@ public:
 
   uint32_t            failed_time_next() const;
   uint32_t            failed_time_last() const   { return m_failed_time_last; }
-  uint32_t            failed_counter() const     { return m_failed_counter; }
+  uint32_t            failed_counter() const     { return (m_multipart_event_num > 1) ? std::min(m_failed_counter_array[0], m_failed_counter_array[1]) : m_failed_counter_array[0]; }
 
   uint32_t            activity_time_last() const { return failed_counter() ? m_failed_time_last : m_success_time_last; }
   uint32_t            activity_time_next() const { return failed_counter() ? failed_time_next() : success_time_next(); }
@@ -73,6 +73,13 @@ public:
   uint32_t            scrape_complete() const    { return m_scrape_complete; }
   uint32_t            scrape_incomplete() const  { return m_scrape_incomplete; }
   uint32_t            scrape_downloaded() const  { return m_scrape_downloaded; }
+
+  // NEW
+  uint32_t            success_time_last(int i) const  { return m_success_time_last_array[i]; }
+  uint32_t            success_counter(int i) const    { return m_success_counter_array[i]; }
+  uint32_t            failed_time_last(int i) const  { return m_failed_time_last_array[i]; }
+  uint32_t            failed_counter(int i) const    { return m_failed_counter_array[i]; }
+  // End NEW
 
 protected:
   friend class torrent::TrackerDht;
@@ -105,6 +112,18 @@ protected:
 
   uint32_t            m_failed_time_last{0};
   uint32_t            m_failed_counter{0};
+
+  // NEW
+  static constexpr size_t N_NUM = 2;
+  size_t              m_multipart_event_num{1};
+  size_t              m_multipart_event_index{0};
+  uint32_t            m_latest_new_peers_array[N_NUM]{0};
+  uint32_t            m_latest_sum_peers_array[N_NUM]{0};
+  uint32_t            m_success_time_last_array[N_NUM]{0};
+  uint32_t            m_success_counter_array[N_NUM]{0};
+  uint32_t            m_failed_time_last_array[N_NUM]{0};
+  uint32_t            m_failed_counter_array[N_NUM]{0};
+  // End NEW
 
   uint32_t            m_scrape_time_last{0};
   uint32_t            m_scrape_counter{0};
@@ -146,6 +165,14 @@ TrackerState::clear_stats() {
   m_success_counter = 0;
   m_failed_counter = 0;
   m_scrape_counter = 0;
+
+  m_multipart_event_index = 0;
+  for (size_t i = 0; i < N_NUM; i++) {
+      m_latest_new_peers_array[i] = 0;
+      m_latest_sum_peers_array[i] = 0;
+      m_success_counter_array[i] = 0;
+      m_failed_counter_array[i] = 0;
+  }
 }
 
 inline void
