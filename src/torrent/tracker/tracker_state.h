@@ -29,6 +29,7 @@ public:
   static constexpr int flag_enabled       = 0x1;
   static constexpr int flag_extra_tracker = 0x2;
   static constexpr int flag_scrapable     = 0x4;
+  static constexpr int flag_ipv6          = 0x8;
 
   // TODO: Remove these:
   // static constexpr int max_flag_size   = 0x10;

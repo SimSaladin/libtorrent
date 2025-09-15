@@ -32,7 +32,8 @@ namespace torrent {
 
 TrackerHttp::TrackerHttp(const TrackerInfo& info, int flags)
   : TrackerWorker(info, utils::uri_can_scrape(info.url) ? (flags | tracker::TrackerState::flag_scrapable) : flags),
-    m_drop_deliminator(utils::uri_has_query(info.url)) {
+    m_drop_deliminator(utils::uri_has_query(info.url)),
+    m_use_ipv6((flags & tracker::TrackerState::flag_ipv6) > 0) {
 
   m_get.reset(info.url, nullptr);
 
@@ -98,6 +99,7 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   auto local_address = config::network_config()->local_address();
 
+  /*
   if (sa_is_any(local_address.get())) {
     if (config::network_config()->is_prefer_ipv6()) {
       auto ipv6_address = detect_local_sin6_addr();
@@ -107,6 +109,9 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
       }
     }
   } else {
+  */
+
+  if (!m_use_ipv6) {
     s << "&ip=" << sa_addr_str(local_address.get());
   }
 
@@ -149,8 +154,8 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
   // TODO: We need to include ipv4/ipv6 param in tracker requests if we bind to the other, so it
   // needs to be handled here.
 
-  bool is_block_ipv4 = config::network_config()->is_block_ipv4();
-  bool is_block_ipv6 = config::network_config()->is_block_ipv6();
+  bool is_block_ipv4 = m_use_ipv6 || config::network_config()->is_block_ipv4();
+  bool is_block_ipv6 = (!m_use_ipv6) || config::network_config()->is_block_ipv6();
   bool is_prefer_ipv6 = config::network_config()->is_prefer_ipv6();
 
   // If both IPv4 and IPv6 are blocked, we cannot send the request.
