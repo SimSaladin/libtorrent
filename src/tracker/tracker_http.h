@@ -30,30 +30,35 @@ public:
   tracker_enum        type() const override;
 
 private:
-  void                close_directly();
+  void                close_directly(int what = 0x1 | 0x2);
 
   void                request_prefix(std::stringstream* stream, const std::string& url);
 
   void                delayed_send_scrape();
 
-  void                receive_done();
-  void                receive_signal_failed(const std::string& msg);
-  void                receive_failed(const std::string& msg);
+  void                receive_done(int what);
+  void                receive_signal_failed(const std::string& msg, int what);
+  void                receive_failed(const std::string& msg, int what);
 
-  void                process_failure(const Object& object);
-  void                process_success(const Object& object);
+  void                process_failure(const Object& object, int what);
+  void                process_success(const Object& object, int what);
   void                process_scrape(const Object& object);
 
   void                update_tracker_id(const std::string& id);
 
   net::HttpGet                       m_get;
   std::shared_ptr<std::stringstream> m_data;
+  net::HttpGet                       m_get_in6;
+  std::shared_ptr<std::stringstream> m_data_in6;
 
   bool                  m_drop_deliminator;
   std::string           m_current_tracker_id;
 
   bool                  m_requested_scrape;
   utils::SchedulerEntry m_delay_scrape;
+
+  bool                  m_announce_ipv6;
+  bool                  m_announce_over_same_sa;
 };
 
 } // namespace torrent
