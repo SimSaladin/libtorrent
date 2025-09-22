@@ -186,3 +186,20 @@ EXTRA_DIST= \
 	net/udns/udns_rr_ptr.c \
 	net/udns/udns_rr_srv.c \
 	net/udns/udns_rr_txt.c
+
+# Export some internal things for use in rtorrent.
+libtorrent_data_includedir = $(includedir)/data
+libtorrent_data_include_HEADERS = \
+	data/chunk_handle.h \
+	data/chunk_list_node.h
+libtorrent_download_includedir = $(includedir)/download
+libtorrent_download_include_HEADERS = \
+	download/delegator.h \
+	download/download_main.h
+libtorrent_net_includedir = $(includedir)/net
+libtorrent_net_include_HEADERS = \
+	net/address_list.h \
+	net/data_buffer.h
+libtorrent_tracker_includedir = $(includedir)/tracker
+libtorrent_tracker_include_HEADERS = \
+	tracker/tracker_list.h
