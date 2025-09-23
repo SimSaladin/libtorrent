@@ -17,6 +17,7 @@ namespace torrent::net {
 NetworkConfig::NetworkConfig() {
   m_bind_address = sa_make_unspec();
   m_local_address = sa_make_unspec();
+  m_local_address_in6 = sin6_make_any();
   m_proxy_address = sa_make_unspec();
 }
 
