@@ -186,6 +186,8 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
     ///    }
 
   auto doit = [&, s = s.str()](auto af, auto& ip, auto& m_get, auto& m_data) {
+      LT_LOG("sending event net_family:%i ip:%s", option_as_string(OPTION_TRACKER_EVENT, new_state), af, ip);
+
       std::string request_url = s + "&ip=" + ip;
 
       m_data = std::make_unique<std::stringstream>();
@@ -207,12 +209,13 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
       torrent::net_thread::http_stack()->start_get(m_get);
   };
 
-  if (!ipv4_s.empty() && !is_block_ipv4) {
+  if (/*!ipv4_s.empty() &&*/ !is_block_ipv4) {
     doit(4, ipv4_s, m_get, m_data);
   }
-  if (!ipv6_s.empty() && !is_block_ipv6) {
+  if (/*!ipv6_s.empty() &&*/ !is_block_ipv6) {
     doit(6, ipv6_s, m_get_in6, m_data_in6);
   }
+  //if (ipv6_s.empty() && ipv4_s.empty()
 
 }
 
