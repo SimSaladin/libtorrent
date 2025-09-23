@@ -268,18 +268,18 @@ TrackerList::insert_url(unsigned int group, const std::string& url, bool extra_t
   if (std::strncmp("http://", url.c_str(), 7) == 0 ||
       std::strncmp("https://", url.c_str(), 8) == 0) {
 
-    flags |= tracker::TrackerState::flag_announce_match_family;
+    //flags |= tracker::TrackerState::flag_announce_match_family;
 
     // Announcing IPv4
     worker = new TrackerHttp(tracker_info, flags);
-    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
+    //insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
 
-    // Announcing IPv6
-    flags |= tracker::TrackerState::flag_announce_ipv6;
-    worker = new TrackerHttp(tracker_info, flags);
-    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
+    //// Announcing IPv6
+    //flags |= tracker::TrackerState::flag_announce_ipv6;
+    //worker = new TrackerHttp(tracker_info, flags);
+    //insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
 
-    return;
+    //return;
 
   } else if (std::strncmp("udp://", url.c_str(), 6) == 0) {
     worker = new TrackerUdp(tracker_info, flags);

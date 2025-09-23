@@ -32,19 +32,23 @@ namespace torrent {
 
 TrackerHttp::TrackerHttp(const TrackerInfo& info, int flags)
   : TrackerWorker(info, utils::uri_can_scrape(info.url) ? (flags | tracker::TrackerState::flag_scrapable) : flags),
-    m_drop_deliminator(utils::uri_has_query(info.url)),
+    m_drop_deliminator(utils::uri_has_query(info.url))/*,
     m_announce_ipv6((flags & tracker::TrackerState::flag_announce_ipv6)),
-    m_announce_over_same_sa((flags & tracker::TrackerState::flag_announce_match_family)) {
+    m_announce_over_same_sa((flags & tracker::TrackerState::flag_announce_match_family))*/ {
 
   m_get.reset(info.url, nullptr);
+  m_get_in6.reset(info.url, nullptr);
 
-  if (m_announce_over_same_sa) {
-    if (m_announce_ipv6) m_get.use_ipv6();
-    else m_get.use_ipv4();
-  }
+  //if (m_announce_over_same_sa) {
+  //  if (m_announce_ipv6) m_get.use_ipv6();
+  //  else m_get.use_ipv4();
+  //}
 
-  m_get.add_done_slot([this] { receive_done(); });
-  m_get.add_failed_slot([this](const auto& str) { receive_signal_failed(str); });
+  m_get.add_done_slot([this] { receive_done(0x1); });
+  m_get.add_failed_slot([this](const auto& str) { receive_signal_failed(str, 0x1); });
+
+  m_get_in6.add_done_slot([this] { receive_done(0x2); });
+  m_get_in6.add_failed_slot([this](const auto& str) { receive_signal_failed(str, 0x2); });
 
   m_delay_scrape.slot() = [this] { delayed_send_scrape(); };
 }
@@ -56,7 +60,7 @@ TrackerHttp::~TrackerHttp() {
 
 bool
 TrackerHttp::is_busy() const {
-  return m_data != nullptr;
+  return m_data != nullptr || m_data_in6 != nullptr;
 }
 
 void
@@ -105,20 +109,25 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   auto local_address = config::network_config()->local_address();
 
+  std::string ipv4_s, ipv6_s;
+
+  if (!sa_is_any(local_address.get())) {
+      ipv4_s = sa_addr_str(local_address.get());
+  }
+
   if (m_announce_ipv6 || sa_is_any(local_address.get())) {
     auto ipv6_address = config::network_config()->local_address_in6();
-
     if (sin6_is_any(ipv6_address.get())) {
       ipv6_address = detect_local_sin6_addr();
       config::network_config()->set_local_address_in6(ipv6_address.get());
     }
-
     if (ipv6_address != nullptr) {
-      s << "&ip=" << sin6_addr_str(ipv6_address.get());
+      ipv6_s = sin6_addr_str(ipv6_address.get());
+      //s << "&ip=" << ipv6_s;
     }
-  } else {
-    s << "&ip=" << sa_addr_str(local_address.get());
-  }
+  } /*else {
+    s << "&ip=" << ipv4_s;
+  }*/
 
   auto parameters = m_slot_parameters();
 
@@ -144,13 +153,6 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
     break;
   }
 
-  m_data = std::make_unique<std::stringstream>();
-
-  std::string request_url = s.str();
-
-  m_get.try_wait_for_close();
-  m_get.reset(request_url, m_data);
-
   // TODO: Move to network config and add simple retry other AF logic.
 
   // TODO: We need to handle retry logic here, not in http stack, as we need to change the bind
@@ -169,10 +171,6 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   if (is_block_ipv4 && is_block_ipv6)
     throw torrent::internal_error("Cannot send tracker event, both IPv4 and IPv6 are blocked.");
-  else if (m_announce_over_same_sa) {
-      if ((is_block_ipv6 && m_announce_ipv6) || (is_block_ipv4 && !m_announce_ipv6))
-        throw torrent::internal_error("Cannot announce via IPv6 or IPv4, because one of them is blocked.");
-  }
   else if (is_block_ipv4)
     m_get.use_ipv6();
   else if (is_block_ipv6)
@@ -180,12 +178,40 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
   else if (is_prefer_ipv6)
     m_get.prefer_ipv6();
 
-  LT_LOG_DUMP(request_url.c_str(), request_url.size(),
-              "sending event : state:%s up_adj:%" PRIu64 " completed_adj:%" PRIu64 " left_adj:%" PRIu64,
-              option_as_string(OPTION_TRACKER_EVENT, new_state),
-              parameters.uploaded_adjusted, parameters.completed_adjusted, parameters.download_left);
+    /// // else if (m_announce_over_same_sa) {
+    ///        if ((is_block_ipv6 && m_announce_ipv6) || (is_block_ipv4 && !m_announce_ipv6))
+    ///          throw torrent::internal_error("Cannot announce via IPv6 or IPv4, because one of them is blocked.");
+    ///    }
 
-  torrent::net_thread::http_stack()->start_get(m_get);
+  auto doit = [&, s = s.str()](auto af, auto& ip, auto& m_get, auto& m_data) {
+      std::string request_url = s + "&ip=" + ip;
+
+      m_data = std::make_unique<std::stringstream>();
+
+      m_get.try_wait_for_close();
+      m_get.reset(request_url, m_data);
+
+      if (af == 4) {
+          m_get.use_ipv4();
+      } else if (af == 6) {
+          m_get.use_ipv6();
+      }
+
+      LT_LOG_DUMP(request_url.c_str(), request_url.size(),
+                  "sending event : state:%s up_adj:%" PRIu64 " completed_adj:%" PRIu64 " left_adj:%" PRIu64,
+                  option_as_string(OPTION_TRACKER_EVENT, new_state),
+                  parameters.uploaded_adjusted, parameters.completed_adjusted, parameters.download_left);
+
+      torrent::net_thread::http_stack()->start_get(m_get);
+  };
+
+  if (!ipv4_s.empty() && !is_block_ipv4) {
+    doit(4, ipv4_s, m_get, m_data);
+  }
+  if (!ipv6_s.empty() && !is_block_ipv6) {
+    doit(6, ipv6_s, m_get_in6, m_data_in6);
+  }
+
 }
 
 void
@@ -230,6 +256,7 @@ TrackerHttp::delayed_send_scrape() {
 
   m_get.try_wait_for_close();
   m_get.reset(request_url, m_data);
+  m_get.prefer_ipv6();
 
   LT_LOG_DUMP(request_url.c_str(), request_url.size(), "tracker scrape", 0);
   torrent::net_thread::http_stack()->start_get(m_get);
@@ -252,8 +279,8 @@ TrackerHttp::type() const {
 }
 
 void
-TrackerHttp::close_directly() {
-  if (m_data == nullptr) {
+TrackerHttp::close_directly(int what) {
+  if (m_data == nullptr && m_data_in6 == nullptr) {
     LT_LOG("closing directly (already closed) : state:%s url:%s",
            option_as_string(OPTION_TRACKER_EVENT, state().latest_event()), info().url.c_str());
 
@@ -265,12 +292,20 @@ TrackerHttp::close_directly() {
          option_as_string(OPTION_TRACKER_EVENT, state().latest_event()), info().url.c_str());
 
   m_slot_close();
-  m_get.close_and_cancel_callbacks(this_thread::thread());
-  m_data.reset();
+  if (what & 0x1) {
+      m_get.close_and_cancel_callbacks(this_thread::thread());
+      m_data.reset();
+  }
+  if (what & 0x2) {
+      m_get_in6.close_and_cancel_callbacks(this_thread::thread());
+      m_data_in6.reset();
+  }
 }
 
 void
-TrackerHttp::receive_done() {
+TrackerHttp::receive_done(int what) {
+  auto& m_data = (what & 0x2) ? this->m_data_in6 : this->m_data;
+
   if (m_data == nullptr)
     throw internal_error("TrackerHttp::receive_done() called on an invalid object");
 
@@ -291,21 +326,21 @@ TrackerHttp::receive_done() {
 
   if (m_data->fail()) {
     std::string dump = m_data->str();
-    return receive_failed("Could not parse bencoded data: " + rak::sanitize(rak::striptags(dump)).substr(0,99));
+    return receive_failed("Could not parse bencoded data: " + rak::sanitize(rak::striptags(dump)).substr(0,99), what);
   }
 
   if (!b.is_map())
-    return receive_failed("Root not a bencoded map");
+    return receive_failed("Root not a bencoded map", what);
 
   if (b.has_key("failure reason")) {
     if (state().latest_event() != tracker::TrackerState::EVENT_SCRAPE)
-      process_failure(b);
+      process_failure(b, what);
 
     return receive_failed("Failure reason \"" +
                          (b.get_key("failure reason").is_string() ?
                           b.get_key_string("failure reason") :
                           std::string("failure reason not a string"))
-                         + "\"");
+                         + "\"", what);
   }
 
   // If no failures, set intervals to defaults prior to processing
@@ -316,21 +351,23 @@ TrackerHttp::receive_done() {
     return;
   }
 
-  process_success(b);
+  process_success(b, what);
 
   if (m_requested_scrape && !is_busy())
     this_thread::scheduler()->wait_for_ceil_seconds(&m_delay_scrape, 10s);
 }
 
 void
-TrackerHttp::receive_signal_failed(const std::string& msg) {
+TrackerHttp::receive_signal_failed(const std::string& msg, int what) {
   lock_and_clear_intervals();
 
-  return receive_failed(msg);
+  return receive_failed(msg, what);
 }
 
 void
-TrackerHttp::receive_failed(const std::string& msg) {
+TrackerHttp::receive_failed(const std::string& msg, int what) {
+  auto& m_data = (what & 0x2) ? this->m_data_in6 : this->m_data;
+
   if (m_data == nullptr)
     throw internal_error("TrackerHttp::receive_failed() called on an invalid object");
 
@@ -341,7 +378,7 @@ TrackerHttp::receive_failed(const std::string& msg) {
     LT_LOG_DUMP(dump.c_str(), dump.size(), "received failure", 0);
   }
 
-  close_directly();
+  close_directly(what);
 
   if (state().latest_event() == tracker::TrackerState::EVENT_SCRAPE) {
     m_requested_scrape = false;
@@ -356,7 +393,7 @@ TrackerHttp::receive_failed(const std::string& msg) {
 }
 
 void
-TrackerHttp::process_failure(const Object& object) {
+TrackerHttp::process_failure(const Object& object, int what) {
   auto guard = lock_guard();
 
   if (object.has_key_string("tracker id"))
@@ -379,7 +416,7 @@ TrackerHttp::process_failure(const Object& object) {
 }
 
 void
-TrackerHttp::process_success(const Object& object) {
+TrackerHttp::process_success(const Object& object, int what) {
   {
     auto guard = lock_guard();
 
@@ -407,7 +444,7 @@ TrackerHttp::process_success(const Object& object) {
   }
 
   if (!object.has_key("peers") && !object.has_key("peers6"))
-    return receive_failed("No peers returned");
+    return receive_failed("No peers returned", what);
 
   AddressList l;
 
@@ -422,27 +459,27 @@ TrackerHttp::process_success(const Object& object) {
         l.parse_address_normal(object.get_key_list("peers"));
 
     } catch (const bencode_error& e) {
-      return receive_failed(e.what());
+      return receive_failed(e.what(), what);
     }
   }
 
   if (object.has_key_string("peers6"))
     l.parse_address_compact_ipv6(object.get_key_string("peers6"));
 
-  close_directly();
+  close_directly(what);
   m_slot_success(std::move(l));
 }
 
 void
 TrackerHttp::process_scrape(const Object& object) {
   if (!object.has_key_map("files"))
-    return receive_failed("Tracker scrape does not have files entry.");
+    return receive_failed("Tracker scrape does not have files entry.", 0);
 
   // Add better validation here...
   const Object& files = object.get_key("files");
 
   if (!files.has_key_map(info().info_hash.str()))
-    return receive_failed("Tracker scrape replay did not contain infohash.");
+    return receive_failed("Tracker scrape replay did not contain infohash.", 0);
 
   const Object& stats = files.get_key(info().info_hash.str());
 
