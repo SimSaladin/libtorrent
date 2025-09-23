@@ -118,11 +118,12 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
       }
 
       if (sin6_is_any(ipv6_address.get())) {
-        ipv6_address = detect_local_sin6_addr();
-        if (ipv6_address != nullptr) {
-            ipv6_address->sin6_port = 0;
-          config::network_config()->set_local_address_in6(ipv6_address.get());
-          ipv6_s = sin6_addr_str(ipv6_address.get());
+        auto ip = detect_local_sin6_addr();
+        if (ip != nullptr) {
+            ip->sin6_port = 0;
+            ipv6_address = sin6_copy(reinterpret_cast<const sockaddr_in6*>(ip.get()));
+            config::network_config()->set_local_address_in6(ipv6_address.get());
+            ipv6_s = sin6_addr_str(ipv6_address.get());
           //s << "&ip=" << ipv6_s;
         }
       } /*else {
