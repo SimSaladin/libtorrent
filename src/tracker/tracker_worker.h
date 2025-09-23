@@ -52,8 +52,8 @@ protected:
   friend class tracker::Tracker;
   friend class ::TrackerTest;
 
-  void                lock_and_clear_intervals();
-  void                lock_and_clear_stats();
+  void                lock_and_clear_intervals(int i = 0);
+  void                lock_and_clear_stats(int i = 0);
   void                lock_and_set_latest_event(tracker::TrackerState::event_enum new_state);
 
   void                lock() const                          { m_mutex.lock(); }
@@ -113,13 +113,13 @@ inline TrackerWorker::TrackerWorker(TrackerInfo info, int flags) :
 }
 
 inline void
-TrackerWorker::lock_and_clear_intervals() {
+TrackerWorker::lock_and_clear_intervals(int i) {
   auto guard = lock_guard();
   m_state.clear_intervals();
 }
 
 inline void
-TrackerWorker::lock_and_clear_stats() {
+TrackerWorker::lock_and_clear_stats(int i) {
   auto guard = lock_guard();
   m_state.clear_stats();
 }

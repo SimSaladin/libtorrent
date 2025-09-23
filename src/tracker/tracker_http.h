@@ -30,7 +30,7 @@ public:
   tracker_enum        type() const override;
 
 private:
-  void                close_directly(int what = 0);
+  void                close_directly(int what = 0x1 | 0x2);
 
   void                request_prefix(std::stringstream* stream, const std::string& url);
 

@@ -107,27 +107,27 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
   // TODO: Make all connection_manager related calls thread-safe.
   //
 
-  auto local_address = config::network_config()->local_address();
-
   std::string ipv4_s, ipv6_s;
 
-  if (!sa_is_any(local_address.get())) {
-      ipv4_s = sa_addr_str(local_address.get());
-  }
+  {
+      auto local_address = config::network_config()->local_address();
+      auto ipv6_address = config::network_config()->local_address_in6();
 
-  if (m_announce_ipv6 || sa_is_any(local_address.get())) {
-    auto ipv6_address = config::network_config()->local_address_in6();
-    if (sin6_is_any(ipv6_address.get())) {
-      ipv6_address = detect_local_sin6_addr();
-      config::network_config()->set_local_address_in6(ipv6_address.get());
-    }
-    if (ipv6_address != nullptr) {
-      ipv6_s = sin6_addr_str(ipv6_address.get());
-      //s << "&ip=" << ipv6_s;
-    }
-  } /*else {
-    s << "&ip=" << ipv4_s;
-  }*/
+      if (!sa_is_any(local_address.get())) {
+          ipv4_s = sa_addr_str(local_address.get());
+      }
+
+      if (sin6_is_any(ipv6_address.get())) {
+        ipv6_address = detect_local_sin6_addr();
+        if (ipv6_address != nullptr) {
+          config::network_config()->set_local_address_in6(ipv6_address.get());
+          ipv6_s = sin6_addr_str(ipv6_address.get());
+          //s << "&ip=" << ipv6_s;
+        }
+      } /*else {
+        s << "&ip=" << ipv4_s;
+      }*/
+  }
 
   auto parameters = m_slot_parameters();
 
@@ -322,7 +322,7 @@ TrackerHttp::receive_done(int what) {
   // Temporarily reset the interval
   //
   // TODO: This might be causing an issue with too frequent tracker requests.
-  lock_and_clear_intervals();
+  lock_and_clear_intervals(what - 1);
 
   if (m_data->fail()) {
     std::string dump = m_data->str();
@@ -359,7 +359,7 @@ TrackerHttp::receive_done(int what) {
 
 void
 TrackerHttp::receive_signal_failed(const std::string& msg, int what) {
-  lock_and_clear_intervals();
+  lock_and_clear_intervals(what - 1);
 
   return receive_failed(msg, what);
 }
@@ -472,14 +472,17 @@ TrackerHttp::process_success(const Object& object, int what) {
 
 void
 TrackerHttp::process_scrape(const Object& object) {
+
+  int what = 0x1 | 0x2;
+
   if (!object.has_key_map("files"))
-    return receive_failed("Tracker scrape does not have files entry.", 0);
+    return receive_failed("Tracker scrape does not have files entry.", what);
 
   // Add better validation here...
   const Object& files = object.get_key("files");
 
   if (!files.has_key_map(info().info_hash.str()))
-    return receive_failed("Tracker scrape replay did not contain infohash.", 0);
+    return receive_failed("Tracker scrape replay did not contain infohash.", what);
 
   const Object& stats = files.get_key(info().info_hash.str());
 

@@ -82,6 +82,13 @@ public:
   uint32_t            scrape_incomplete() const  { return m_scrape_incomplete; }
   uint32_t            scrape_downloaded() const  { return m_scrape_downloaded; }
 
+  // Added
+  uint32_t            success_time_last(int i) const  { return m_success_time_last_array[i]; }
+  uint32_t            success_counter(int i) const    { return m_success_counter_array[i]; }
+  uint32_t            failed_time_last(int i) const  { return m_failed_time_last_array[i]; }
+  uint32_t            failed_counter(int i) const    { return m_failed_counter_array[i]; }
+  // End added
+
 protected:
   friend class torrent::TrackerDht;
   friend class torrent::TrackerHttp;
@@ -113,6 +120,14 @@ protected:
 
   uint32_t            m_failed_time_last{0};
   uint32_t            m_failed_counter{0};
+
+  // Additional fields for breakdown by e.g. IPv4 & IPv6
+  static constexpr size_t N_NUM = 2;
+  uint32_t            m_success_time_last_array[N_NUM]{0};
+  uint32_t            m_success_counter_array[N_NUM]{0};
+  uint32_t            m_failed_time_last_array[N_NUM]{0};
+  uint32_t            m_failed_counter_array[N_NUM]{0};
+  // End additional fields
 
   uint32_t            m_scrape_time_last{0};
   uint32_t            m_scrape_counter{0};
