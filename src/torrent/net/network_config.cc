@@ -104,6 +104,18 @@ NetworkConfig::local_address_str() const {
   return sa_addr_str(m_local_address.get());
 }
 
+c_sin6_shared_ptr
+NetworkConfig::local_address_in6() const {
+  auto guard = lock_guard();
+  return m_local_address_in6;
+}
+
+std::string
+NetworkConfig::local_address_in6_str() const {
+  auto guard = lock_guard();
+  return sin6_addr_str(m_local_address_in6.get());
+}
+
 c_sa_shared_ptr
 NetworkConfig::proxy_address() const {
   auto guard = lock_guard();
@@ -154,6 +166,21 @@ NetworkConfig::set_local_address(const sockaddr* sa) {
   LT_LOG_NOTICE("local address : %s", sa_pretty_str(sa).c_str());
 
   m_local_address = sa_copy(sa);
+}
+
+void
+NetworkConfig::set_local_address_in6(const sockaddr_in6* sin6) {
+  if (sin6->sin6_family != AF_INET6)
+      throw input_error("Tried to set a local inet6 address that is not an unspec/inet6 address.");
+
+  if (sin6->sin6_port != 0)
+    throw input_error("Tried to set a local inet6 address with a non-zero port.");
+
+  auto guard = lock_guard();
+
+  LT_LOG_NOTICE("local address (inet6) : %s", sin6_pretty_str(sin6).c_str());
+
+  m_local_address_in6 = sin6_copy(sin6);
 }
 
 void

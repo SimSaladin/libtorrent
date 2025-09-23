@@ -26,10 +26,11 @@ public:
     EVENT_SCRAPE
   };
 
-  static constexpr int flag_enabled       = 0x1;
-  static constexpr int flag_extra_tracker = 0x2;
-  static constexpr int flag_scrapable     = 0x4;
-  static constexpr int flag_ipv6          = 0x8;
+  static constexpr int flag_enabled               = 0x1;
+  static constexpr int flag_extra_tracker         = 0x2;
+  static constexpr int flag_scrapable             = 0x4;
+  static constexpr int flag_announce_ipv6         = 0x8;
+  static constexpr int flag_announce_match_family = 0x10;
 
   // TODO: Remove these:
   // static constexpr int max_flag_size   = 0x10;
@@ -49,6 +50,12 @@ public:
   bool                is_extra_tracker() const   { return (m_flags & flag_extra_tracker); }
   bool                is_in_use() const          { return is_enabled() && m_success_counter != 0; }
   bool                is_scrapable() const       { return (m_flags & flag_scrapable); }
+
+  bool                is_announce_ipv6 () const  { return (m_flags & flag_announce_ipv6); }
+  bool                is_announce_ipv4 () const  { return !(m_flags & flag_announce_ipv6); }
+  bool                is_inet6_only() const      { return (m_flags & flag_announce_match_family) && is_announce_ipv6(); }
+  bool                is_inet4_only() const      { return (m_flags & flag_announce_match_family) && is_announce_ipv4(); }
+  bool                is_inet_any() const        { return !(m_flags & flag_announce_match_family); }
 
   uint32_t            normal_interval() const    { return m_normal_interval; }
   uint32_t            min_interval() const       { return m_min_interval; }

@@ -252,7 +252,6 @@ TrackerList::insert(unsigned int group, const tracker::Tracker& tracker) {
 void
 TrackerList::insert_url(unsigned int group, const std::string& url, bool extra_tracker) {
   TrackerWorker* worker;
-  std::optional<torrent::TrackerHttp*> worker6;
 
   int flags = tracker::TrackerState::flag_enabled;
 
@@ -268,8 +267,19 @@ TrackerList::insert_url(unsigned int group, const std::string& url, bool extra_t
 
   if (std::strncmp("http://", url.c_str(), 7) == 0 ||
       std::strncmp("https://", url.c_str(), 8) == 0) {
+
+    flags |= tracker::TrackerState::flag_announce_match_family;
+
+    // Announcing IPv4
     worker = new TrackerHttp(tracker_info, flags);
-    worker6 = new TrackerHttp(tracker_info, flags | tracker::TrackerState::flag_ipv6);
+    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
+
+    // Announcing IPv6
+    flags |= tracker::TrackerState::flag_announce_ipv6;
+    worker = new TrackerHttp(tracker_info, flags);
+    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
+
+    return;
 
   } else if (std::strncmp("udp://", url.c_str(), 6) == 0) {
     worker = new TrackerUdp(tracker_info, flags);
@@ -287,8 +297,6 @@ TrackerList::insert_url(unsigned int group, const std::string& url, bool extra_t
   }
 
   insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
-  if (worker6.has_value())
-    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker6.value())));
 }
 
 TrackerList::iterator
