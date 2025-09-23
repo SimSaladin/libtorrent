@@ -288,7 +288,7 @@ TrackerList::insert_url(unsigned int group, const std::string& url, bool extra_t
 
   insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker)));
   if (worker6.has_value())
-    insert(group + 100, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker6.value())));
+    insert(group, tracker::Tracker(std::shared_ptr<TrackerWorker>(worker6.value())));
 }
 
 TrackerList::iterator
