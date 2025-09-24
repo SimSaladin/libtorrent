@@ -70,7 +70,11 @@ public:
 
   uint32_t            failed_time_next() const;
   uint32_t            failed_time_last() const   { return m_failed_time_last; }
-  uint32_t            failed_counter() const     { return m_failed_counter; }
+  uint32_t            failed_counter() const     {
+      if (m_multipart_event_num > 1)
+          return std::min(m_failed_counter, std::min(m_failed_counter_array[0], m_failed_counter_array[1]));
+      return std::min(m_failed_counter, m_failed_counter_array[0]);
+  }
 
   uint32_t            activity_time_last() const { return failed_counter() ? m_failed_time_last : m_success_time_last; }
   uint32_t            activity_time_next() const { return failed_counter() ? failed_time_next() : success_time_next(); }
@@ -123,6 +127,10 @@ protected:
 
   // Additional fields for breakdown by e.g. IPv4 & IPv6
   static constexpr size_t N_NUM = 2;
+  size_t              m_multipart_event_num{1};
+  size_t              m_multipart_event_index{0};
+  uint32_t            m_latest_new_peers_array[N_NUM]{0};
+  uint32_t            m_latest_sum_peers_array[N_NUM]{0};
   uint32_t            m_success_time_last_array[N_NUM]{0};
   uint32_t            m_success_counter_array[N_NUM]{0};
   uint32_t            m_failed_time_last_array[N_NUM]{0};

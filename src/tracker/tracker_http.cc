@@ -83,6 +83,9 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   lock_and_set_latest_event(new_state);
 
+  state().m_multipart_event_num = 1;
+  state().m_multipart_event_index = 0;
+
   std::stringstream s;
   s.imbue(std::locale::classic());
 
@@ -124,11 +127,8 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
             ipv6_address = sin6_copy(reinterpret_cast<const sockaddr_in6*>(ip.get()));
             config::network_config()->set_local_address_in6(ipv6_address.get());
             ipv6_s = sin6_addr_str(ipv6_address.get());
-          //s << "&ip=" << ipv6_s;
         }
-      } /*else {
-        s << "&ip=" << ipv4_s;
-      }*/
+      }
   }
 
   auto parameters = m_slot_parameters();
@@ -208,17 +208,16 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
                   option_as_string(OPTION_TRACKER_EVENT, new_state),
                   parameters.uploaded_adjusted, parameters.completed_adjusted, parameters.download_left);
 
+      this->state().m_multipart_event_num += 1;
       torrent::net_thread::http_stack()->start_get(*m_get);
   };
 
-  if (/*!ipv4_s.empty() &&*/ !is_block_ipv4) {
+  if (!is_block_ipv4) {
     doit(4, ipv4_s, &m_get, &m_data);
   }
-  if (/*!ipv6_s.empty() &&*/ !is_block_ipv6) {
+  if (!is_block_ipv6) {
     doit(6, ipv6_s, &m_get_in6, &m_data_in6);
   }
-  //if (ipv6_s.empty() && ipv4_s.empty()
-
 }
 
 void
@@ -329,7 +328,7 @@ TrackerHttp::receive_done(int what) {
   // Temporarily reset the interval
   //
   // TODO: This might be causing an issue with too frequent tracker requests.
-  lock_and_clear_intervals(what - 1);
+  lock_and_clear_intervals();
 
   if (m_data->fail()) {
     std::string dump = m_data->str();
@@ -366,7 +365,7 @@ TrackerHttp::receive_done(int what) {
 
 void
 TrackerHttp::receive_signal_failed(const std::string& msg, int what) {
-  lock_and_clear_intervals(what - 1);
+  lock_and_clear_intervals();
 
   return receive_failed(msg, what);
 }

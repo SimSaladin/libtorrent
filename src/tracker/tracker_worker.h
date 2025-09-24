@@ -52,7 +52,7 @@ protected:
   friend class tracker::Tracker;
   friend class ::TrackerTest;
 
-  void                lock_and_clear_intervals(int i = 0);
+  void                lock_and_clear_intervals();
   void                lock_and_clear_stats(int i = 0);
   void                lock_and_set_latest_event(tracker::TrackerState::event_enum new_state);
 
@@ -94,6 +94,8 @@ protected:
   std::function<void(std::string)>   m_slot_scrape_failure;
   std::function<TrackerParameters()> m_slot_parameters;
 
+  size_t            multipart_events{0};
+
 private:
   TrackerWorker(const TrackerWorker&) = delete;
   TrackerWorker& operator=(const TrackerWorker&) = delete;
@@ -113,7 +115,7 @@ inline TrackerWorker::TrackerWorker(TrackerInfo info, int flags) :
 }
 
 inline void
-TrackerWorker::lock_and_clear_intervals(int i) {
+TrackerWorker::lock_and_clear_intervals() {
   auto guard = lock_guard();
   m_state.clear_intervals();
 }
