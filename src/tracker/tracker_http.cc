@@ -185,20 +185,24 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
     ///          throw torrent::internal_error("Cannot announce via IPv6 or IPv4, because one of them is blocked.");
     ///    }
 
-  auto doit = [&, s = s.str()](auto af, auto& ip, auto& m_get, auto& m_data) {
-      LT_LOG("sending event net_family:%i ip:%s", option_as_string(OPTION_TRACKER_EVENT, new_state), af, ip == nullptr ? "(no ip)" : ip.get());
+  auto doit = [this, new_state, parameters, s = s.str()](int af, std::string& ip, auto* m_get, auto* m_data) {
+      LT_LOG("sending event net_family:%i ip:%s",
+              option_as_string(OPTION_TRACKER_EVENT, new_state),
+              af, ip.empty() ? "(no ip)" : ip);
 
-      std::string request_url = s + "&ip=" + ip;
+      std::string request_url = s;
+      if (!ip.empty())
+          request_url += "&ip=" + ip;
 
-      m_data = std::make_unique<std::stringstream>();
+      *m_data = std::make_unique<std::stringstream>();
 
-      m_get.try_wait_for_close();
-      m_get.reset(request_url, m_data);
+      m_get->try_wait_for_close();
+      m_get->reset(request_url, *m_data);
 
       if (af == 4) {
-          m_get.use_ipv4();
+          m_get->use_ipv4();
       } else if (af == 6) {
-          m_get.use_ipv6();
+          m_get->use_ipv6();
       }
 
       LT_LOG_DUMP(request_url.c_str(), request_url.size(),
@@ -206,14 +210,14 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
                   option_as_string(OPTION_TRACKER_EVENT, new_state),
                   parameters.uploaded_adjusted, parameters.completed_adjusted, parameters.download_left);
 
-      torrent::net_thread::http_stack()->start_get(m_get);
+      torrent::net_thread::http_stack()->start_get(*m_get);
   };
 
   if (/*!ipv4_s.empty() &&*/ !is_block_ipv4) {
-    doit(4, ipv4_s, m_get, m_data);
+    doit(4, ipv4_s, &m_get, &m_data);
   }
   if (/*!ipv6_s.empty() &&*/ !is_block_ipv6) {
-    doit(6, ipv6_s, m_get_in6, m_data_in6);
+    doit(6, ipv6_s, &m_get_in6, &m_data_in6);
   }
   //if (ipv6_s.empty() && ipv4_s.empty()
 
