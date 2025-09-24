@@ -186,9 +186,7 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
     ///    }
 
   auto doit = [this, new_state, parameters, s = s.str()](int af, std::string& ip, auto* m_get, auto* m_data) {
-      LT_LOG("sending event net_family:%i ip:%s",
-              option_as_string(OPTION_TRACKER_EVENT, new_state),
-              af, ip.empty() ? "(no ip)" : ip);
+      LT_LOG("sending event : net_family:%i ip:%s", af, ip.empty() ? "(no ip)" : ip.c_str());
 
       std::string request_url = s;
       if (!ip.empty())
