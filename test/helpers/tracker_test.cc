@@ -73,6 +73,11 @@ TrackerTest::set_failed(uint32_t counter, uint32_t time_last) {
   state().m_failed_time_last = time_last;
   state().m_normal_interval = 0;
   state().m_min_interval = 0;
+
+  for (size_t i = 0; i < 2; i++) {
+      state().m_failed_counter_array[i] = counter;
+      state().m_failed_time_last_array[i] = time_last;
+  }
 }
 
 void
