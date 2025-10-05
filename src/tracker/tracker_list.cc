@@ -394,7 +394,7 @@ TrackerList::receive_success(tracker::Tracker tracker, AddressList* l) {
   if (itr == end())
     throw internal_error("TrackerList::receive_success(...) called but the iterator is invalid.");
 
-  auto n = 0;
+  size_t n = 0;
 
   /* NEW doesn't work anymore
   if (tracker.is_busy())
