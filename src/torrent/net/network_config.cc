@@ -22,8 +22,8 @@ c_sa_shared_ptr inet6_any_value = sa_make_inet6_any();
 NetworkConfig::NetworkConfig() {
   m_bind_inet_address = sa_make_unspec();
   m_bind_inet6_address = sa_make_unspec();
-  m_local_address = sa_make_unspec();
-  m_local_address_in6 = sin6_make_any();
+  m_local_inet_address = sa_make_unspec();
+  m_local_inet6_address = sa_make_unspec();
   m_proxy_address = sa_make_unspec();
 }
 
@@ -251,25 +251,25 @@ NetworkConfig::bind_inet6_address_str() const {
 c_sa_shared_ptr
 NetworkConfig::local_address() const {
   auto guard = lock_guard();
-  return m_local_address;
+  return m_local_inet_address;
 }
 
 std::string
 NetworkConfig::local_address_str() const {
   auto guard = lock_guard();
-  return sa_addr_str(m_local_address.get());
+  return sa_addr_str(m_local_inet_address.get());
 }
 
-c_sin6_shared_ptr
-NetworkConfig::local_address_in6() const {
+c_sa_shared_ptr
+NetworkConfig::local_inet6_address() const {
   auto guard = lock_guard();
-  return m_local_address_in6;
+  return m_local_inet6_address;
 }
 
 std::string
-NetworkConfig::local_address_in6_str() const {
+NetworkConfig::local_inet6_address_str() const {
   auto guard = lock_guard();
-  return sin6_addr_str(m_local_address_in6.get());
+  return sa_addr_str(m_local_inet6_address.get());
 }
 
 c_sa_shared_ptr
@@ -360,6 +360,24 @@ NetworkConfig::set_bind_inet6_address(const sockaddr* sa) {
 
 void
 NetworkConfig::set_local_address(const sockaddr* sa) {
+  switch (sa->sa_family) {
+    case AF_UNSPEC:
+      set_local_inet_address(sa);
+      set_local_inet6_address(sa);
+      break;
+    case AF_INET:
+      set_local_inet_address(sa);
+      break;
+    case AF_INET6:
+      set_local_inet6_address(sa);
+      break;
+    default:
+      throw internal_error("NetworkConfig::set_local_address: invalid address family");
+  }
+}
+
+void
+NetworkConfig::set_local_inet_address(const sockaddr* sa) {
   if (sa->sa_family != AF_INET && sa->sa_family != AF_UNSPEC)
     throw input_error("Tried to set a local address that is not an unspec/inet address.");
 
@@ -370,22 +388,22 @@ NetworkConfig::set_local_address(const sockaddr* sa) {
 
   LT_LOG_NOTICE("local address : %s", sa_pretty_str(sa).c_str());
 
-  m_local_address = sa_copy(sa);
+  m_local_inet_address = sa_copy(sa);
 }
 
 void
-NetworkConfig::set_local_address_in6(const sockaddr_in6* sin6) {
-  if (sin6->sin6_family != AF_INET6)
+NetworkConfig::set_local_inet6_address(const sockaddr* sa) {
+  if (sa->sa_family != AF_INET6 && sa->sa_family != AF_UNSPEC)
       throw input_error("Tried to set a local inet6 address that is not an unspec/inet6 address.");
 
-  if (sin6->sin6_port != 0)
+  if (sa_port(sa) != 0)
     throw input_error("Tried to set a local inet6 address with a non-zero port.");
 
   auto guard = lock_guard();
 
-  LT_LOG_NOTICE("local address (inet6) : %s", sin6_pretty_str(sin6).c_str());
+  LT_LOG_NOTICE("local address (inet6) : %s", sa_pretty_str(sa).c_str());
 
-  m_local_address_in6 = sin6_copy(sin6);
+  m_local_inet6_address = sa_copy(sa);
 }
 
 void

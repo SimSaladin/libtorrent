@@ -35,13 +35,14 @@ TrackerHttp::TrackerHttp(const TrackerInfo& info, int flags)
     m_drop_deliminator(utils::uri_has_query(info.url)) {
 
   m_get.reset(info.url, nullptr);
-  m_get_in6.reset(info.url, nullptr); // NEW
 
   m_get.add_done_slot([this] { receive_done(0x1); });
   m_get.add_failed_slot([this](const auto& str) { receive_signal_failed(str, 0x1); });
 
-  m_get_in6.add_done_slot([this] { receive_done(0x2); }); // NEW
-  m_get_in6.add_failed_slot([this](const auto& str) { receive_signal_failed(str, 0x2); }); // NEW
+  m_get_in6.reset(info.url, nullptr);
+
+  m_get_in6.add_done_slot([this] { receive_done(0x2); });
+  m_get_in6.add_failed_slot([this](const auto& str) { receive_signal_failed(str, 0x2); });
 
   m_delay_scrape.slot() = [this] { delayed_send_scrape(); };
 }
@@ -76,9 +77,6 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   lock_and_set_latest_event(new_state);
 
-  state().m_multipart_event_num = 0; // NEW
-  state().m_multipart_event_index = 0; // NEW
-
   std::stringstream s;
   s.imbue(std::locale::classic());
 
@@ -107,23 +105,24 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
   {
       auto local_address = config::network_config()->local_address();
-      auto ipv6_address = config::network_config()->local_address_in6();
+      auto ipv6_address = config::network_config()->local_inet6_address();
 
       if (!sa_is_any(local_address.get())) {
           ipv4_s = sa_addr_str(local_address.get());
       }
 
-      if (sin6_is_any(ipv6_address.get())) {
-        auto ip = detect_local_sin6_addr();
-        if (ip != nullptr) {
-            ip->sin6_port = 0;
-            ipv6_address = sin6_copy(reinterpret_cast<const sockaddr_in6*>(ip.get()));
-            config::network_config()->set_local_address_in6(ipv6_address.get());
+      if (sa_is_any(ipv6_address.get())) {
+        auto sin6_detected = detect_local_sin6_addr();
+        if (sin6_detected != nullptr) {
+            sin6_detected->sin6_port = 0;
+            ipv6_address = sa_copy(reinterpret_cast<const sockaddr*>(sin6_detected.get()));
+            // XXX: fixes the 6 address...
+            config::network_config()->set_local_inet6_address(ipv6_address.get());
         }
       }
 
-      if (ipv6_address != nullptr && !sin6_is_any(ipv6_address.get())) {
-            ipv6_s = sin6_addr_str(ipv6_address.get());
+      if (ipv6_address != nullptr && !sa_is_any(ipv6_address.get())) {
+        ipv6_s = sa_addr_str(ipv6_address.get());
       }
   }
 
@@ -176,11 +175,6 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
   else if (is_prefer_ipv6)
     m_get.prefer_ipv6();
 
-    /// // else if (m_announce_over_same_sa) {
-    ///        if ((is_block_ipv6 && m_announce_ipv6) || (is_block_ipv4 && !m_announce_ipv6))
-    ///          throw torrent::internal_error("Cannot announce via IPv6 or IPv4, because one of them is blocked.");
-    ///    }
-
   auto doit = [this, new_state, parameters, s = s.str()](int af, std::string& ip, auto* m_get, auto* m_data) {
       LT_LOG("sending event : net_family:%i ip:%s", af, ip.empty() ? "(no ip)" : ip.c_str());
 
@@ -207,6 +201,9 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
       this->state().m_multipart_event_num++;
       torrent::net_thread::http_stack()->start_get(*m_get);
   };
+
+  state().m_multipart_event_num = 0;
+  state().m_multipart_event_index = 0;
 
   if (!is_block_ipv4) {
     doit(4, ipv4_s, &m_get, &m_data);
@@ -258,7 +255,6 @@ TrackerHttp::delayed_send_scrape() {
 
   m_get.try_wait_for_close();
   m_get.reset(request_url, m_data);
-  m_get.prefer_ipv6();
 
   LT_LOG_DUMP(request_url.c_str(), request_url.size(), "tracker scrape", 0);
   torrent::net_thread::http_stack()->start_get(m_get);

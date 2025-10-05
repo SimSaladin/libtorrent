@@ -56,9 +56,6 @@ private:
 
   bool                  m_requested_scrape;
   utils::SchedulerEntry m_delay_scrape;
-
-  bool                  m_announce_ipv6;
-  bool                  m_announce_over_same_sa;
 };
 
 } // namespace torrent
