@@ -1,6 +1,7 @@
 #ifndef LIBTORRENT_TRACKER_TRACKER_HTTP_H
 #define LIBTORRENT_TRACKER_TRACKER_HTTP_H
 
+#include "net/address_list.h"
 #include <iosfwd>
 #include <memory>
 
@@ -30,25 +31,35 @@ public:
   void                close() override;
 
 private:
-  void                close_directly();
+  void                close_directly(const int proto);
 
   void                request_prefix(std::stringstream* stream, const std::string& url);
   std::string         request_announce_url(tracker::TrackerState::event_enum state, TrackerParameters params, int family);
 
   void                delayed_send_scrape();
 
-  void                receive_done();
-  void                receive_signal_failed(const std::string& msg);
-  void                receive_failed(const std::string& msg);
+  void                receive_done_ipv4();
+  void                receive_done_ipv6();
+  void                receive_done_generic(const int proto);
+  void                receive_signal_failed(const int proto, const std::string& msg);
+  void                receive_failed(const int proto, const std::string& msg);
 
-  void                process_failure(const Object& object);
-  void                process_success(const Object& object);
+  void                process_failure(const int proto, const Object& object);
+  void                process_success(const int proto, const Object& object);
   void                process_scrape(const Object& object);
 
   void                update_tracker_id(const std::string& id);
 
-  net::HttpGet                       m_get;
-  std::shared_ptr<std::stringstream> m_data;
+  static constexpr int IPV4 = 0;
+  static constexpr int IPV6 = 1;
+  net::HttpGet                       m_get[2];
+  std::shared_ptr<std::stringstream> m_data[2];
+  int wait_close = 0;
+  int wait_result = 0;
+  torrent::AddressList* proto_result[2];
+  void proto_m_close(const int proto);
+  void proto_m_slot_failure(const int proto, const std::string& msg);
+  void proto_m_slot_success(const int proto, torrent::AddressList alist);
 
   bool                  m_drop_deliminator{};
   std::string           m_current_tracker_id;

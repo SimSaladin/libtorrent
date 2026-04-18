@@ -623,10 +623,10 @@ NetworkConfig::set_generic_address_unsafe(const char* category, c_sa_shared_ptr&
     break;
   case AF_INET:
     inet_address = sa_copy(sa);
-    inet6_address = sa_make_unspec();
+    //inet6_address = sa_make_unspec();
     break;
   case AF_INET6:
-    inet_address = sa_make_unspec();
+    //inet_address = sa_make_unspec();
     inet6_address = sa_copy(sa);
     break;
   default:
