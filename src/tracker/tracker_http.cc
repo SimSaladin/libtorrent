@@ -167,11 +167,11 @@ TrackerHttp::proto_m_slot_success(const int proto, torrent::AddressList&& l) {
     if (wait_result == 0) {
         LT_LOG("slot success in success: %i", proto);
         auto other = proto_result[proto == 0 ? 1 : 0];
-        //if (other != NULL) {
-        //    for (auto x : *other) {
-        //        proto_result[proto]->push_back(x);
-        //    }
-        //}
+        if (other != NULL) {
+            for (auto x : *other) {
+                proto_result[proto]->push_back(x);
+            }
+        }
         m_slot_success(std::move(*proto_result[proto]));
     }
 }
