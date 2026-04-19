@@ -137,6 +137,7 @@ TrackerHttp::send_event(tracker::TrackerState::event_enum new_state) {
 
 void
 TrackerHttp::proto_m_close(const int proto) {
+    auto guard = lock_guard();
     wait_close--;
     if (wait_close == 0)
         m_slot_close();
@@ -144,27 +145,33 @@ TrackerHttp::proto_m_close(const int proto) {
 
 void
 TrackerHttp::proto_m_slot_failure(const int proto, const std::string& msg) {
+    auto guard = lock_guard();
+    LT_LOG("proto failure : %i (%s)", proto, msg.c_str());
     wait_result--;
     if (wait_result == 0) {
         if (proto_result[0] == NULL && proto_result[1] == NULL) {
             m_slot_failure(msg);
         } else {
+            LT_LOG("slot success in failure: %i", proto);
             m_slot_success(std::move(*proto_result[proto == 0 ? 1 : 0]));
         }
     }
 }
 
 void
-TrackerHttp::proto_m_slot_success(const int proto, torrent::AddressList l) {
+TrackerHttp::proto_m_slot_success(const int proto, torrent::AddressList&& l) {
+    auto guard = lock_guard();
+    LT_LOG("proto success : %i", proto);
     wait_result--;
-    proto_result[proto] = &l;
+    proto_result[proto] = std::make_shared<torrent::AddressList>(l);
     if (wait_result == 0) {
+        LT_LOG("slot success in success: %i", proto);
         auto other = proto_result[proto == 0 ? 1 : 0];
-        if (other != NULL) {
-            for (auto x : *other) {
-                proto_result[proto]->push_back(x);
-            }
-        }
+        //if (other != NULL) {
+        //    for (auto x : *other) {
+        //        proto_result[proto]->push_back(x);
+        //    }
+        //}
         m_slot_success(std::move(*proto_result[proto]));
     }
 }
@@ -479,6 +486,7 @@ TrackerHttp::process_success(const int proto, const Object& object) {
 
     close_directly(proto);
     proto_m_slot_success(proto, AddressList());
+    return;
   }
 
   AddressList l;

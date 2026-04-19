@@ -52,14 +52,14 @@ private:
 
   static constexpr int IPV4 = 0;
   static constexpr int IPV6 = 1;
-  net::HttpGet                       m_get[2];
-  std::shared_ptr<std::stringstream> m_data[2];
+  net::HttpGet                       m_get[2]{};
+  std::shared_ptr<std::stringstream> m_data[2]{};
   int wait_close = 0;
   int wait_result = 0;
-  torrent::AddressList* proto_result[2];
+  std::shared_ptr<torrent::AddressList> proto_result[2];
   void proto_m_close(const int proto);
   void proto_m_slot_failure(const int proto, const std::string& msg);
-  void proto_m_slot_success(const int proto, torrent::AddressList alist);
+  void proto_m_slot_success(const int proto, torrent::AddressList&& alist);
 
   bool                  m_drop_deliminator{};
   std::string           m_current_tracker_id;
