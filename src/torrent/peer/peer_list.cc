@@ -14,11 +14,21 @@
 #include "torrent/utils/log.h"
 
 #define LT_LOG_EVENTS(log_fmt, ...)                                     \
-  lt_log_print_info(LOG_PEER_LIST_EVENTS, m_info, "peer_list", log_fmt, __VA_ARGS__);
+  lt_log_print_info(LOG_PEER_LIST_EVENTS, m_info, "peer_list : " log_fmt, __VA_ARGS__);
 #define LT_LOG_ADDRESS(log_fmt, ...)                                    \
-  lt_log_print_info(LOG_PEER_LIST_ADDRESS, m_info, "peer_list", log_fmt, __VA_ARGS__);
+  lt_log_print_info(LOG_PEER_LIST_ADDRESS, m_info, "peer_list : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
+
+namespace {
+
+// Addresses a remote peer list must never be able to point the client at.
+bool
+is_unroutable_peer(const sockaddr* sa) {
+  return sa_is_any(sa) || sa_is_broadcast(sa) || sa_is_loopback(sa) || sa_is_link_local(sa);
+}
+
+} // namespace
 
 ipv4_table PeerList::m_ipv4_table;
 
@@ -101,13 +111,19 @@ uint32_t
 PeerList::insert_available(const void* al) {
   auto address_list = static_cast<const AddressList*>(al);
 
+  if (m_available_list->size() >= m_available_list->max_size())
+    return 0;
+
   uint32_t inserted = 0;
   uint32_t invalid = 0;
   uint32_t unneeded = 0;
   uint32_t updated = 0;
 
-  if (m_available_list->size() + address_list->size() > m_available_list->capacity())
-    m_available_list->reserve(m_available_list->size() + address_list->size() + 128);
+  auto remaining = m_available_list->max_size() - m_available_list->size();
+  auto reserve_size = m_available_list->size() + std::min(remaining, address_list->size());
+
+  if (reserve_size > m_available_list->capacity())
+    m_available_list->reserve(reserve_size);
 
   // Optimize this so that we don't traverse the tree for every
   // insert, since we know 'al' is sorted.
@@ -115,11 +131,17 @@ PeerList::insert_available(const void* al) {
   auto avail_itr  = m_available_list->begin();
   auto avail_last = m_available_list->end();
 
-  for (const auto& addr : *address_list) {
+  auto addr_itr  = address_list->begin();
+  auto addr_last = address_list->end();
+
+  while (addr_itr != addr_last &&
+         m_available_list->size() < m_available_list->max_size()) {
+    const auto& addr = *addr_itr++;
     auto addr_str = sa_addr_str(&addr.sa);
     auto port = sa_port(&addr.sa);
 
-    if (!socket_address_key::is_comparable_sockaddr(&addr.sa) || port == 0) {
+    if (!socket_address_key::is_comparable_sockaddr(&addr.sa) || port == 0 ||
+        is_unroutable_peer(&addr.sa)) {
       invalid++;
       LT_LOG_ADDRESS("adding available address: skipped invalid : %s", sa_pretty_str(&addr.sa).c_str());
       continue;
@@ -324,7 +346,7 @@ PeerList::disconnected(iterator itr, int flags) {
   if (itr->second->transfer_counter() != 0) {
     // Currently we only log these as it only affects the culling of
     // peers.
-    LT_LOG_EVENTS("disconnected with non-zero transfer counter (%" PRIu32 ") for peer %40s",
+    LT_LOG_EVENTS("disconnected with non-zero transfer counter (%" PRIu32 ") for peer %40.40s",
                   itr->second->transfer_counter(), itr->second->id_hex());
   }
 
@@ -390,7 +412,22 @@ PeerList::insert_pex_list(const raw_string& pex_list) {
   l.parse_address_compact(pex_list);
   l.sort_and_unique();
 
-  LT_LOG_EVENTS("inserting pex list: %" PRIu32 " peers", l.size());
+  LT_LOG_EVENTS("inserting pex list: %zu peers", l.size());
+
+  return insert_available(&l);
+}
+
+uint32_t
+PeerList::insert_pex_list6(const raw_string& pex_list) {
+  if (pex_list.empty())
+    return 0;
+
+  AddressList l;
+
+  l.parse_address_compact_ipv6(pex_list);
+  l.sort_and_unique();
+
+  LT_LOG_EVENTS("inserting pex6 list: %zu peers", l.size());
 
   return insert_available(&l);
 }

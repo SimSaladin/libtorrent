@@ -7,9 +7,10 @@
 #include "torrent/hash_string.h"
 #include "torrent/object.h"
 #include "torrent/net/types.h"
+#include "torrent/system/scheduler.h"
 #include "torrent/tracker/dht_controller.h"
-#include "torrent/utils/scheduler.h"
 
+#include <chrono>
 #include <optional>
 
 namespace torrent {
@@ -31,11 +32,18 @@ public:
   static constexpr unsigned int timeout_bucket_bootstrap =     15 * 60;  // Bootstrap idle buckets after 15 minutes.
   static constexpr unsigned int timeout_remove_node      = 4 * 60 * 60;  // Remove unresponsive nodes after 4 hours.
   static constexpr unsigned int timeout_peer_announce    =     30 * 60;  // Remove peers which haven't reannounced for 30 minutes.
+  static constexpr unsigned int timeout_tracker_evict    =     60 * 60;  // Evict stale trackers hourly while at max_trackers.
+
+  // Maximum number of info hashes we keep peer lists for. Entries are removed
+  // once they hold no peers, and while the table is full the least recently
+  // announced 5% are evicted every timeout_tracker_evict.
+  static constexpr size_t max_trackers      = 1024;
+  static constexpr size_t num_tracker_evict = max_trackers / 20;
 
   // A node ID of all zero.
   static HashString zero_id;
 
-  DhtRouter(const Object& cache);
+  DhtRouter(tracker::DhtController* controller, const Object& cache);
   ~DhtRouter();
 
   void                start(int port);
@@ -44,11 +52,15 @@ public:
   bool                is_active()                        { return m_server.is_active(); }
 
   // Pass NULL to cancel_announce to cancel all announces for the tracker.
-  void                announce(const HashString& info_hash, TrackerDht* tracker);
-  void                cancel_announce(const HashString* info_hash, const TrackerDht* tracker);
+  void                announce(const HashString& info_hash, std::weak_ptr<TrackerDht> tracker);
+  void                cancel_announce(const HashString& info_hash, std::weak_ptr<TrackerDht> tracker);
 
   // Returns NULL if not tracking the torrent unless create is true.
   DhtTracker*         get_tracker(const HashString& hash, bool create);
+
+  // Evict the least recently announced trackers if the table is full and
+  // timeout_tracker_evict has passed since the last eviction.
+  void                evict_stale_trackers();
 
   // Check if we are interested in inserting a new node of the given ID
   // into our table (i.e. if we have space or bad nodes in the corresponding bucket).
@@ -69,12 +81,11 @@ public:
   // Search for node with given address in O(n), disregarding the port.
   DhtNode*            find_node(const sockaddr* sa);
 
-  // Whenever a node queries us, replies, or is confirmed inactive (no reply) or
-  // invalid (reply with wrong ID), we need to update its status.
+  // Whenever a node queries us, replies, or is confirmed inactive (no reply),
+  // we need to update its status.
   DhtNode*            node_queried(const HashString& id, const sockaddr* sa);
   DhtNode*            node_replied(const HashString& id, const sockaddr* sa);
   DhtNode*            node_inactive(const HashString& id, const sockaddr* sa);
-  void                node_invalid(const HashString& id);
 
   // Store compact node information (26 bytes) for nodes closest to the
   // given ID in the given buffer, return new buffer end.
@@ -100,6 +111,8 @@ private:
   // Maximum number of potential contacts to keep until bootstrap complete.
   static constexpr unsigned int num_bootstrap_contacts = 64;
 
+  bool                check_nodes_populated() const    { return m_nodes.size() >= num_bootstrap_complete; }
+
   using DhtBucketList = std::map<const HashString, DhtBucket*>;
 
   DhtBucketList::iterator find_bucket(const HashString& id);
@@ -120,7 +133,9 @@ private:
   // buffer needs to hold an SHA1 hash (20 bytes), not just the token (8 bytes)
   static char*        generate_token(const sockaddr* sa, int token, char buffer[20]);
 
-  utils::SchedulerEntry m_task_timeout;
+  tracker::DhtController* m_controller;
+
+  system::SchedulerEntry m_task_timeout;
 
   DhtServer           m_server{nullptr};
   DhtNodeList         m_nodes;
@@ -131,12 +146,15 @@ private:
   std::optional<std::deque<contact_t>> m_contacts;
 
   int                 m_numRefresh{0};
+  std::chrono::seconds m_lastTrackerEvict{0};
 
   bool                m_networkUp;
 
   // Secret keys used for generating announce tokens.
   int                 m_curToken;
   int                 m_prevToken;
+
+  system::callback_id m_resolver_callback_id;
 };
 
 inline raw_string

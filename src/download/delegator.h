@@ -2,10 +2,13 @@
 #define LIBTORRENT_DELEGATOR_H
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "download/chunk_selector.h"
 #include "torrent/data/transfer_list.h"
+#include "utils/partial_queue.h"
 
 namespace torrent {
 
@@ -18,7 +21,7 @@ class PeerInfo;
 
 class Delegator {
 public:
-  using slot_peer_chunk = std::function<uint32_t(PeerChunks*, bool)>;
+  using slot_peer_chunk = std::function<ChunkSelector::find_result(PeerChunks*)>;
   using slot_size       = std::function<uint32_t(uint32_t)>;
 
   static constexpr unsigned int block_size = 1 << 14;
@@ -26,7 +29,7 @@ public:
   TransferList*       transfer_list()                     { return &m_transfers; }
   const TransferList* transfer_list() const               { return &m_transfers; }
 
-  std::vector<BlockTransfer*> delegate(PeerChunks* peerChunks, uint32_t affinity, uint32_t maxPieces);
+  std::vector<BlockTransfer*> delegate(PeerChunks* peerChunks, std::optional<uint32_t> affinity, uint32_t maxPieces);
 
   bool               get_aggressive() const               { return m_aggressive; }
   void               set_aggressive(bool a)               { m_aggressive = a; }
@@ -36,8 +39,7 @@ public:
 
 private:
   static void        delegate_from_blocklist(std::vector<BlockTransfer*> &transfers, uint32_t maxPieces, BlockList* c, PeerInfo* peerInfo);
-  void               delegate_new_chunks(std::vector<BlockTransfer*> &transfers, uint32_t maxPieces, PeerChunks* pc, bool highPriority);
-  Block*             delegate_seeder(PeerChunks* peerChunks);
+  void               delegate_new_chunks(std::vector<BlockTransfer*> &transfers, uint32_t maxPieces, PeerChunks* pc);
 
   TransferList       m_transfers;
 

@@ -8,11 +8,12 @@
 #include <unistd.h>
 
 #include "torrent/exceptions.h"
+#include "torrent/net/fd.h"
 #include "torrent/utils/file_stat.h"
 #include "torrent/utils/log.h"
 
 #define LT_LOG_ERROR(log_fmt, ...)                                      \
-  lt_log_print(LOG_STORAGE, "socket_file->%i: " log_fmt, m_fd, __VA_ARGS__);
+  lt_log_print(LOG_STORAGE_ERRORS, "socket_file : fd:%i " log_fmt, m_fd, __VA_ARGS__);
 
 namespace torrent {
 
@@ -30,11 +31,7 @@ SocketFile::open(const std::string& path, int prot, int flags, mode_t mode) {
   else
     throw internal_error("torrent::SocketFile::open(...) Tried to open file with no protection flags");
 
-#ifdef O_LARGEFILE
-  fd_type fd = ::open(path.c_str(), flags | O_LARGEFILE, mode);
-#else
-  fd_type fd = ::open(path.c_str(), flags, mode);
-#endif
+  fd_type fd = fd_open_file(path, flags, mode);
 
   if (fd == invalid_fd)
     return false;
@@ -80,42 +77,39 @@ SocketFile::allocate([[maybe_unused]] uint64_t size, [[maybe_unused]] int flags)
   if (!is_open())
     throw internal_error("SocketFile::allocate() called on a closed file");
 
-#if defined(USE_FALLOCATE)
-  if (flags & flag_fallocate) {
-    if (fallocate(m_fd, 0, 0, size) == -1) {
-      LT_LOG_ERROR("fallocate failed : %s", strerror(errno));
+#if defined(HAVE_FALLOCATE)
+  // Optimal path for modern Linux
+  if (::fallocate(m_fd, 0, 0, size) == -1) {
+    LT_LOG_ERROR("fallocate failed : %s", std::strerror(errno));
+    return false;
+  }
+
+#elif defined(HAVE_POSIX_FALLOCATE)
+  // Standard fallback path for modern BSD platforms
+  // Note: Kept your specific non-blocking optimization check if still desired
+  if (flags & flag_fallocate_blocking) {
+    if (::posix_fallocate(m_fd, 0, size) == -1) {
+      LT_LOG_ERROR("posix_fallocate failed : %s", std::strerror(errno));
       return false;
     }
   }
 
-#elif defined(USE_POSIX_FALLOCATE)
-  if (flags & flag_fallocate && flags & flag_fallocate_blocking) {
-    if (posix_fallocate(m_fd, 0, size) == -1) {
-      LT_LOG_ERROR("posix_fallocate failed : %s", strerror(errno));
-      return false;
+#elif defined(__APPLE__)
+  // Native fallback for macOS (which lacks both fallocate variants)
+  fstore_t fstore;
+  fstore.fst_flags      = F_ALLOCATECONTIG;
+  fstore.fst_posmode    = F_PEOFPOSMODE;
+  fstore.fst_offset     = 0;
+  fstore.fst_length     = size;
+  fstore.fst_bytesalloc = 0;
+
+  // Fallback if contiguous block allocation fails
+  if (::fcntl(m_fd, F_PREALLOCATE, &fstore) == -1) {
+    fstore.fst_flags = F_ALLOCATEALL;
+
+    if (::fcntl(m_fd, F_PREALLOCATE, &fstore) == -1) {
+      LT_LOG_ERROR("fcntl(,F_PREALLOCATE,) failed : %s", std::strerror(errno));
     }
-  }
-
-#elif defined(SYS_DARWIN)
-  if (flags & flag_fallocate) {
-    fstore_t fstore;
-    fstore.fst_flags = F_ALLOCATECONTIG;
-    fstore.fst_posmode = F_PEOFPOSMODE;
-    fstore.fst_offset = 0;
-    fstore.fst_length = size;
-    fstore.fst_bytesalloc = 0;
-
-    // This shouldn't really be something we fail the set_size
-    // on.
-    //
-    // Yet is somehow fails with ENOSPC.
-//     if (fcntl(m_fd, F_PREALLOCATE, &fstore) == -1)
-//       throw internal_error("hack: fcntl failed" + std::string(strerror(errno)));
-
-    if (fcntl(m_fd, F_PREALLOCATE, &fstore) == -1)
-      LT_LOG_ERROR("fcntl(,F_PREALLOCATE,) failed : %s", strerror(errno));
-
-    return true;
   }
 #endif
 
@@ -131,7 +125,7 @@ SocketFile::create_padding_chunk(uint32_t length, int prot, int flags) {
   if (ptr == MAP_FAILED)
     return MemoryChunk();
 
-  return MemoryChunk(ptr, ptr, ptr + length, prot, flags);
+  return MemoryChunk(ptr, ptr, ptr + length, prot);
 }
 
 MemoryChunk
@@ -158,7 +152,7 @@ SocketFile::create_chunk(uint64_t offset, uint32_t length, int prot, int flags) 
   if (ptr == MAP_FAILED)
     return MemoryChunk();
 
-  return MemoryChunk(ptr, ptr + align, ptr + align + length, prot, flags);
+  return MemoryChunk(ptr, ptr + align, ptr + align + length, prot);
 }
 
 } // namespace torrent

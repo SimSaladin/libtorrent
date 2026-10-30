@@ -4,12 +4,12 @@
 #include "net/address_list.h"
 #include <iosfwd>
 #include <memory>
+#include <tuple>
 
-#include "torrent/object.h"
 #include "tracker/tracker_worker.h"
 #include "torrent/net/http_get.h"
+#include "torrent/system/scheduler.h"
 #include "torrent/tracker/tracker_state.h"
-#include "torrent/utils/scheduler.h"
 
 namespace torrent {
 
@@ -20,35 +20,41 @@ public:
   static constexpr uint32_t http_timeout = 60;
 
   TrackerHttp(const TrackerInfo& info, int flags = 0);
-  ~TrackerHttp() override;
 
   tracker_enum        type() const override;
 
-  bool                is_busy() const override;
+  void                send_event(tracker::TrackerParams params, tracker::TrackerState::event_enum new_state) override;
+  void                send_scrape(tracker::TrackerParams params) override;
 
-  void                send_event(tracker::TrackerState::event_enum new_state) override;
-  void                send_scrape() override;
   void                close() override;
 
 private:
-  void                close_directly(const int proto);
+  void                close_directly();
+  void                cleanup() override;
 
-  void                request_prefix(std::stringstream* stream, const std::string& url);
-  std::string         request_announce_url(tracker::TrackerState::event_enum state, TrackerParameters params, int family);
+  void                update_requesting_state();
+
+  void                send_event_unsafe(tracker::TrackerState::event_enum state);
+  void                send_scrape_unsafe();
+  bool                send_next_family(bool scrape = false);
 
   void                delayed_send_scrape();
 
-  void                receive_done_ipv4();
-  void                receive_done_ipv6();
-  void                receive_done_generic(const int proto);
-  void                receive_signal_failed(const int proto, const std::string& msg);
-  void                receive_failed(const int proto, const std::string& msg);
+  std::stringstream   request_prefix(const std::string& url);
+  std::string         request_announce_url(tracker::TrackerState::event_enum state, int family);
+  std::tuple<int,int> request_families();
+
+  void                update_tracker_id_unsafe(const std::string& id);
+
+  void                receive_done();
+  void                receive_signal_failed(const std::string& msg);
+  void                receive_failed(const std::string& msg);
 
   void                process_failure(const int proto, const Object& object);
   void                process_success(const int proto, const Object& object);
   void                process_scrape(const Object& object);
 
-  void                update_tracker_id(const std::string& id);
+  tracker::TrackerParams m_params;
 
   static constexpr int IPV4 = 0;
   static constexpr int IPV6 = 1;
@@ -61,11 +67,16 @@ private:
   void proto_m_slot_failure(const int proto, const std::string& msg);
   void proto_m_slot_success(const int proto, torrent::AddressList&& alist);
 
-  bool                  m_drop_deliminator{};
-  std::string           m_current_tracker_id;
+  int                 m_hostname_family{};
+  int                 m_current_family{};
+  int                 m_next_family{};
 
-  bool                  m_requested_scrape{};
-  utils::SchedulerEntry m_delay_scrape;
+  bool                m_last_success{};
+  std::string         m_last_error_message;
+
+  bool                m_requested_scrape{};
+
+  system::SchedulerEntry m_delay_scrape;
 };
 
 } // namespace torrent

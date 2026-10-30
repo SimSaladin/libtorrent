@@ -25,8 +25,8 @@
 #include "object.h"
 #include "throttle.h"
 
-#define LT_LOG_THIS(log_level, log_fmt, ...)                         \
-  lt_log_print_info(LOG_TORRENT_##log_level, m_ptr->info(), "download", log_fmt, __VA_ARGS__);
+#define LT_LOG_EVENTS(log_fmt, ...)                                     \
+  lt_log_print_hash(LOG_TORRENT_EVENTS, m_ptr->info()->hash(), "download : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
@@ -38,7 +38,7 @@ Download::open(int flags) {
   if (m_ptr->info()->is_open())
     return;
 
-  LT_LOG_THIS(INFO, "Opening torrent: flags:%0x.", flags);
+  LT_LOG_EVENTS("opening : flags:%0x.", flags);
 
   // Currently always open with no_create, as start will make sure
   // they are created. Need to fix this.
@@ -54,8 +54,15 @@ Download::open(int flags) {
   if (flags & open_enable_fallocate)
     fileFlags |= File::flag_fallocate;
 
-  for (auto& file : *m_ptr->main()->file_list())
+  // Assign these three rather than only adding them, so that opening
+  // without open_enable_fallocate clears a flag left over from an
+  // earlier open. Any other flag on the file is left alone.
+  int fileFlagsMask = File::flag_create_queued | File::flag_resize_queued | File::flag_fallocate;
+
+  for (auto& file : *m_ptr->main()->file_list()) {
     file->set_flags(fileFlags);
+    file->unset_flags(fileFlagsMask & ~fileFlags);
+  }
 }
 
 void
@@ -63,7 +70,8 @@ Download::close(int flags) {
   if (m_ptr->info()->is_active())
     stop(0);
 
-  LT_LOG_THIS(INFO, "Closing torrent: flags:%0x.", flags);
+  LT_LOG_EVENTS("closing : flags:%0x.", flags);
+
   m_ptr->close();
 }
 
@@ -83,7 +91,7 @@ Download::start(int flags) {
   if (info->is_active())
     return;
 
-  LT_LOG_THIS(INFO, "Starting torrent: flags:%0x.", flags);
+  LT_LOG_EVENTS("starting : flags:%0x.", flags);
 
   m_ptr->data()->verify_wanted_chunks("Download::start(...)");
 
@@ -119,7 +127,7 @@ Download::stop(int flags) {
   if (!m_ptr->info()->is_active())
     return;
 
-  LT_LOG_THIS(INFO, "Stopping torrent: flags:%0x.", flags);
+  LT_LOG_EVENTS("stopping : flags:%0x.", flags);
 
   m_ptr->main()->stop();
 
@@ -150,7 +158,7 @@ Download::hash_check(bool try_quick) {
 
   Bitfield* bitfield = m_ptr->data()->mutable_completed_bitfield();
 
-  LT_LOG_THIS(INFO, "Checking hash: allocated:%i try_quick:%i.", !bitfield->empty(), (int)try_quick);
+  LT_LOG_EVENTS("checking hash : allocated:%i try_quick:%i.", !bitfield->empty(), (int)try_quick);
 
   if (bitfield->empty()) {
     // The bitfield still hasn't been allocated, so no resume data was
@@ -180,7 +188,7 @@ Download::hash_stop() {
   if (!m_ptr->hash_checker()->is_checking())
     return;
 
-  LT_LOG_THIS(INFO, "Hashing stopped.", 0);
+  LT_LOG_EVENTS("hashing stopped", 0);
 
   m_ptr->hash_checker()->hashing_ranges().erase(0, m_ptr->hash_checker()->position());
   m_ptr->hash_queue()->remove(m_ptr->data());
@@ -196,6 +204,11 @@ Download::is_hash_checked() const {
 bool
 Download::is_hash_checking() const {
   return m_ptr->hash_checker()->is_checking();
+}
+
+const std::string&
+Download::hash_error_message() const {
+  return m_ptr->hash_checker()->error_message();
 }
 
 void
@@ -334,6 +347,9 @@ Download::update_range(int flags, uint32_t first, uint32_t last) {
   if (m_ptr->main()->file_list()->bitfield()->empty())
     throw input_error("Download::clear_range(...) Bitfield is empty.");
 
+  if (first > last || last > m_ptr->main()->file_list()->bitfield()->size_bits())
+    throw input_error("Download::update_range(...) Range is out of bounds.");
+
   if (flags & update_range_recheck)
     m_ptr->hash_checker()->hashing_ranges().insert(first, last);
 
@@ -345,7 +361,7 @@ Download::update_range(int flags, uint32_t first, uint32_t last) {
 
 void
 Download::sync_chunks() {
-  m_ptr->main()->chunk_list()->sync_chunks(ChunkList::sync_all | ChunkList::sync_force);
+  m_ptr->main()->chunk_list()->sync_chunks_no_cache(ChunkList::sync_all | ChunkList::sync_force);
 }
 
 uint32_t
@@ -519,30 +535,30 @@ Download::set_connection_type(ConnectionType t) {
   m_ptr->set_connection_type(t);
 }
 
-Download::HeuristicType
+heuristics_enum
 Download::upload_choke_heuristic() const {
-  return static_cast<Download::HeuristicType>(m_ptr->main()->choke_group()->up_queue()->heuristics());
+  return m_ptr->main()->choke_group()->up_queue()->heuristics();
 }
 
 void
-Download::set_upload_choke_heuristic(HeuristicType t) {
-  if (static_cast<choke_queue::heuristics_enum>(t) >= choke_queue::HEURISTICS_MAX_SIZE)
+Download::set_upload_choke_heuristic(heuristics_enum t) {
+  if (t >= HEURISTICS_MAX_SIZE)
     throw input_error("Invalid heuristics value.");
 
-  m_ptr->main()->choke_group()->up_queue()->set_heuristics(static_cast<choke_queue::heuristics_enum>(t));
+  m_ptr->main()->choke_group()->up_queue()->set_heuristics(t);
 }
 
-Download::HeuristicType
+heuristics_enum
 Download::download_choke_heuristic() const {
-  return static_cast<Download::HeuristicType>(m_ptr->main()->choke_group()->down_queue()->heuristics());
+  return m_ptr->main()->choke_group()->down_queue()->heuristics();
 }
 
 void
-Download::set_download_choke_heuristic(HeuristicType t) {
-  if (static_cast<choke_queue::heuristics_enum>(t) >= choke_queue::HEURISTICS_MAX_SIZE)
+Download::set_download_choke_heuristic(heuristics_enum t) {
+  if (t >= HEURISTICS_MAX_SIZE)
     throw input_error("Invalid heuristics value.");
 
-  m_ptr->main()->choke_group()->down_queue()->set_heuristics(static_cast<choke_queue::heuristics_enum>(t));
+  m_ptr->main()->choke_group()->down_queue()->set_heuristics(t);
 }
 
 void

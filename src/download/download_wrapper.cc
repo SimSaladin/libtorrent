@@ -18,13 +18,13 @@
 #include "torrent/utils/log.h"
 #include "tracker/thread_tracker.h"
 #include "tracker/tracker_list.h"
-#include "utils/functional.h"
+#include "torrent/utils/functional.h"
 #include "utils/sha1.h"
 
-#define LT_LOG_THIS(log_fmt, ...)                                       \
-  lt_log_print_info(LOG_TORRENT_INFO, this->info(), "download", log_fmt, __VA_ARGS__);
+#define LT_LOG_DEBUG(log_fmt, ...)                                     \
+  lt_log_print_hash(LOG_TORRENT_DEBUG, this->info()->hash(), "download : " log_fmt, __VA_ARGS__);
 #define LT_LOG_STORAGE_ERRORS(log_fmt, ...)                             \
-  lt_log_print_info(LOG_PROTOCOL_STORAGE_ERRORS, this->info(), "storage_errors", log_fmt, __VA_ARGS__);
+  lt_log_print_hash(LOG_PROTOCOL_STORAGE_ERRORS, this->info()->hash(), "storage_errors : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
@@ -57,7 +57,7 @@ DownloadWrapper::~DownloadWrapper() {
     // will need to manually cancel the tracker requests.
     m_main->tracker_controller().close();
 
-    thread_tracker()->tracker_manager()->remove_controller(m_main->tracker_controller());
+    tracker_thread::manager()->remove_controller(m_main->tracker_controller());
     m_main->tracker_controller().get_shared().reset();
   }
 }
@@ -106,7 +106,7 @@ DownloadWrapper::close() {
   // This could/should be async as we do not care that much if it
   // succeeds or not, any chunks not included in that last
   // hash_resume_save get ignored anyway.
-  m_main->chunk_list()->sync_chunks(ChunkList::sync_all | ChunkList::sync_force | ChunkList::sync_sloppy | ChunkList::sync_ignore_error);
+  m_main->chunk_list()->sync_chunks_no_cache(ChunkList::sync_all | ChunkList::sync_force | ChunkList::sync_sloppy | ChunkList::sync_ignore_error);
 
   m_main->close();
 
@@ -114,11 +114,6 @@ DownloadWrapper::close() {
   this_thread::scheduler()->erase(&m_main->delay_download_done());
   this_thread::scheduler()->erase(&m_main->delay_partially_done());
   this_thread::scheduler()->erase(&m_main->delay_partially_restarted());
-}
-
-bool
-DownloadWrapper::is_stopped() const {
-  return !m_main->tracker_controller().is_active() && !m_main->tracker_list()->has_active_not_dht();
 }
 
 void
@@ -243,13 +238,13 @@ DownloadWrapper::receive_tracker_success(AddressList* l) {
   m_main->receive_connect_peers();
   m_main->receive_tracker_success();
 
-  ::utils::slot_list_call(info()->signal_tracker_success());
+  utils::slot_list_call(info()->signal_tracker_success());
   return inserted;
 }
 
 void
 DownloadWrapper::receive_tracker_failed(const std::string& msg) {
-  ::utils::slot_list_call(info()->signal_tracker_failed(), msg);
+  utils::slot_list_call(info()->signal_tracker_failed(), msg);
 }
 
 void
@@ -299,7 +294,7 @@ DownloadWrapper::receive_tick(uint32_t ticks) {
 
 void
 DownloadWrapper::receive_update_priorities() {
-  LT_LOG_THIS("update priorities: chunks_selected:%" PRIu32 " wanted_chunks:%" PRIu32,
+  LT_LOG_DEBUG("update priorities : chunks_selected:%" PRIu32 " wanted_chunks:%" PRIu32,
               m_main->chunk_selector()->size(), data()->wanted_chunks());
 
   data()->mutable_high_priority()->clear();

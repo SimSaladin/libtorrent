@@ -14,7 +14,7 @@
 #include "torrent/net/socket_address.h"
 #include "torrent/peer/peer.h"
 #include "torrent/peer/peer_info.h"
-#include "utils/functional.h"
+#include "torrent/utils/functional.h"
 
 // When a peer is connected it should be removed from the list of
 // available peers.
@@ -34,6 +34,7 @@ ConnectionList::clear() {
     delete peer->m_ptr();
   }
   base_type::clear();
+  m_changeCounter++;
 
   m_disconnectQueue.clear();
 }
@@ -65,15 +66,17 @@ ConnectionList::insert(PeerInfo* peerInfo, int fd, Bitfield* bitfield, Encryptio
   peerConnection->initialize(m_download, peerInfo, fd, bitfield, encryptionInfo, extensions);
 
   if (peerConnection->file_descriptor() == -1) {
+    peerInfo->set_connection(NULL);
     delete peerConnection;
     return NULL;
   }
 
   base_type::push_back(peerConnection);
+  m_changeCounter++;
 
   m_download->info()->change_flags(DownloadInfo::flag_accepting_new_peers, size() < m_maxSize);
 
-  ::utils::slot_list_call(m_signalConnected, peerConnection);
+  utils::slot_list_call(m_signalConnected, peerConnection);
 
   return peerConnection;
 }
@@ -97,10 +100,11 @@ ConnectionList::erase(iterator pos, int flags) {
   // assumption that the connection will remain in the list.
   *pos = base_type::back();
   base_type::pop_back();
+  m_changeCounter++;
 
   m_download->info()->change_flags(DownloadInfo::flag_accepting_new_peers, size() < m_maxSize);
 
-  ::utils::slot_list_call(m_signalDisconnected, peerConnection);
+  utils::slot_list_call(m_signalDisconnected, peerConnection);
 
   // Before of after the signal?
   peerConnection->cleanup();
@@ -143,8 +147,10 @@ ConnectionList::erase_remaining(iterator pos, int flags) {
 
 void
 ConnectionList::erase_seeders() {
-  erase_remaining(std::partition(begin(), end(), [](Peer* p) { return p->c_ptr()->is_not_seeder(); }),
-                  disconnect_unwanted);
+  auto pos = std::partition(begin(), end(), [](Peer* p) { return p->c_ptr()->is_not_seeder(); });
+  m_changeCounter++;
+
+  erase_remaining(pos, disconnect_unwanted);
 }
 
 void
@@ -190,6 +196,7 @@ ConnectionList::find(const sockaddr* sa) {
 void
 ConnectionList::set_difference(AddressList* l) {
   std::sort(begin(), end(), connection_list_less());
+  m_changeCounter++;
 
   l->erase(std::set_difference(l->begin(), l->end(), begin(), end(), l->begin(), connection_list_less()),
            l->end());

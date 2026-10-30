@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 
 #include "download/download_main.h"
@@ -15,10 +16,11 @@
 #include "choke_queue.h"
 #include "resource_manager.h"
 
-#define LT_LOG_THIS(log_fmt, ...)                                       \
-  lt_log_print_subsystem(LOG_TORRENT_INFO, "resource_manager", log_fmt, __VA_ARGS__);
-#define LT_LOG_ITR(log_fmt, ...)                                        \
-  lt_log_print_info(LOG_TORRENT_INFO, itr->download()->info(), "resource_manager", log_fmt, __VA_ARGS__);
+#define LT_LOG_DEBUG(log_fmt, ...)                                       \
+  lt_log_print(LOG_TORRENT_DEBUG, "resource_manager : " log_fmt, __VA_ARGS__);
+
+#define LT_LOG_DEBUG_ITR(log_fmt, ...)                                  \
+  lt_log_print_hash(LOG_TORRENT_DEBUG, itr->download()->info()->hash(), "resource_manager : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
@@ -28,8 +30,6 @@ const Rate* resource_manager_entry::down_rate() const { return m_download->info(
 ResourceManager::~ResourceManager() {
   assert(m_currentlyUploadUnchoked == 0 && "ResourceManager::~ResourceManager() called but m_currentlyUploadUnchoked != 0.");
   assert(m_currentlyDownloadUnchoked == 0 && "ResourceManager::~ResourceManager() called but m_currentlyDownloadUnchoked != 0.");
-
-  std::for_each(choke_base_type::begin(), choke_base_type::end(), [](choke_group* g) { delete g; });
 }
 
 // If called directly ensure a valid group has been selected.
@@ -41,15 +41,15 @@ ResourceManager::insert(const resource_manager_entry& entry) {
 
   DownloadMain* download = itr->download();
 
-  download->set_choke_group(choke_base_type::at(entry.group()));
+  download->set_choke_group(m_choke_groups.at(entry.group()).get());
 
   if (will_realloc) {
     update_group_iterators();
   } else {
-    auto group_itr = choke_base_type::begin() + itr->group();
+    auto group_itr = m_choke_groups.begin() + itr->group();
     (*group_itr)->set_last((*group_itr)->last() + 1);
 
-    std::for_each(++group_itr, choke_base_type::end(), std::mem_fn(&choke_group::inc_iterators));
+    std::for_each(++group_itr, m_choke_groups.end(), std::mem_fn(&choke_group::inc_iterators));
   }
 
   choke_queue::move_connections(NULL, group_at(entry.group())->up_queue(), download, download->up_group_entry());
@@ -60,32 +60,35 @@ ResourceManager::insert(const resource_manager_entry& entry) {
 
 void
 ResourceManager::update_group_iterators() {
-  auto       entry_itr = base_type::begin();
-  auto group_itr = choke_base_type::begin();
+  auto entry_itr = base_type::begin();
+  auto group_itr = m_choke_groups.begin();
 
-  while (group_itr != choke_base_type::end()) {
-    (*group_itr)->set_first(&*entry_itr);
+  while (group_itr != m_choke_groups.end()) {
+    (*group_itr)->set_first(std::to_address(entry_itr));
+
     entry_itr = std::find_if(entry_itr, end(), [group_itr, this](value_type v) {
-      return (std::distance(choke_base_type::begin(), group_itr)) < v.group();
+      return (std::distance(m_choke_groups.begin(), group_itr)) < v.group();
     });
-    (*group_itr)->set_last(&*entry_itr);
+
+    (*group_itr)->set_last(std::to_address(entry_itr));
     group_itr++;
   }
 }
 
 void
 ResourceManager::validate_group_iterators() {
-  auto       entry_itr = base_type::begin();
-  auto group_itr = choke_base_type::begin();
+  auto entry_itr = base_type::begin();
+  auto group_itr = m_choke_groups.begin();
 
-  while (group_itr != choke_base_type::end()) {
-    if ((*group_itr)->first() != &*entry_itr)
+  while (group_itr != m_choke_groups.end()) {
+    if ((*group_itr)->first() != std::to_address(entry_itr))
       throw internal_error("ResourceManager::receive_tick() invalid first iterator.");
 
     entry_itr = std::find_if(entry_itr, end(), [group_itr, this](value_type v) {
-      return (std::distance(choke_base_type::begin(), group_itr)) < v.group();
+      return (std::distance(m_choke_groups.begin(), group_itr)) < v.group();
     });
-    if ((*group_itr)->last() != &*entry_itr)
+
+    if ((*group_itr)->last() != std::to_address(entry_itr))
       throw internal_error("ResourceManager::receive_tick() invalid last iterator.");
 
     group_itr++;
@@ -102,10 +105,10 @@ ResourceManager::erase(DownloadMain* d) {
   choke_queue::move_connections(group_at(itr->group())->up_queue(), NULL, d, d->up_group_entry());
   choke_queue::move_connections(group_at(itr->group())->down_queue(), NULL, d, d->down_group_entry());
 
-  auto group_itr = choke_base_type::begin() + itr->group();
+  auto group_itr = m_choke_groups.begin() + itr->group();
   (*group_itr)->set_last((*group_itr)->last() - 1);
 
-  std::for_each(++group_itr, choke_base_type::end(), std::mem_fn(&choke_group::dec_iterators));
+  std::for_each(++group_itr, m_choke_groups.end(), std::mem_fn(&choke_group::dec_iterators));
 
   base_type::erase(itr);
 }
@@ -113,25 +116,30 @@ ResourceManager::erase(DownloadMain* d) {
 void
 ResourceManager::push_group(const std::string& name) {
   if (name.empty() ||
-      std::any_of(choke_base_type::begin(), choke_base_type::end(),
-                  [name](choke_group* g) { return name == g->name(); }))
+      std::any_of(m_choke_groups.begin(), m_choke_groups.end(), [name](auto& g) { return name == g->name(); }))
     throw input_error("Duplicate name for choke group.");
 
-  choke_base_type::push_back(new choke_group());
+  m_choke_groups.push_back(std::make_unique<choke_group>());
 
-  choke_base_type::back()->set_name(name);
-  choke_base_type::back()->set_first(&*base_type::end());
-  choke_base_type::back()->set_last(&*base_type::end());
+  m_choke_groups.back()->set_name(name);
 
-  choke_base_type::back()->up_queue()->set_heuristics(choke_queue::HEURISTICS_UPLOAD_LEECH);
-  choke_base_type::back()->down_queue()->set_heuristics(choke_queue::HEURISTICS_DOWNLOAD_LEECH);
+  if (base_type::empty()) {
+    m_choke_groups.back()->set_first(nullptr);
+    m_choke_groups.back()->set_last(nullptr);
+  } else {
+    m_choke_groups.back()->set_first(&*base_type::end());
+    m_choke_groups.back()->set_last(&*base_type::end());
+  }
 
-  choke_base_type::back()->up_queue()->set_slot_unchoke([this](int n) { receive_upload_unchoke(n); });
-  choke_base_type::back()->down_queue()->set_slot_unchoke([this](int n) { receive_download_unchoke(n); });
-  choke_base_type::back()->up_queue()->set_slot_can_unchoke([this] { return retrieve_upload_can_unchoke(); });
-  choke_base_type::back()->down_queue()->set_slot_can_unchoke([this] { return retrieve_download_can_unchoke(); });
-  choke_base_type::back()->up_queue()->set_slot_connection(&PeerConnectionBase::receive_upload_choke);
-  choke_base_type::back()->down_queue()->set_slot_connection(&PeerConnectionBase::receive_download_choke);
+  m_choke_groups.back()->up_queue()->set_heuristics(HEURISTICS_UPLOAD_LEECH);
+  m_choke_groups.back()->down_queue()->set_heuristics(HEURISTICS_DOWNLOAD_LEECH);
+
+  m_choke_groups.back()->up_queue()->set_slot_unchoke([this](int n)   { receive_upload_unchoke(n); });
+  m_choke_groups.back()->down_queue()->set_slot_unchoke([this](int n) { receive_download_unchoke(n); });
+  m_choke_groups.back()->up_queue()->set_slot_can_unchoke([this]      { return retrieve_upload_can_unchoke(); });
+  m_choke_groups.back()->down_queue()->set_slot_can_unchoke([this]    { return retrieve_download_can_unchoke(); });
+  m_choke_groups.back()->up_queue()->set_slot_connection(&PeerConnectionBase::receive_upload_choke);
+  m_choke_groups.back()->down_queue()->set_slot_connection(&PeerConnectionBase::receive_download_choke);
 }
 
 ResourceManager::iterator
@@ -156,36 +164,35 @@ ResourceManager::find_group_end(uint16_t group) {
 
 choke_group*
 ResourceManager::group_at(uint16_t grp) {
-  if (grp >= choke_base_type::size())
+  if (grp >= m_choke_groups.size())
     throw input_error("Choke group not found.");
 
-  return choke_base_type::at(grp);
+  return m_choke_groups.at(grp).get();
 }
 
 choke_group*
 ResourceManager::group_at_name(const std::string& name) {
-  auto itr = std::find_if(choke_base_type::begin(), choke_base_type::end(), [name](choke_group* g) { return name == g->name(); });
+  auto itr = std::find_if(m_choke_groups.begin(), m_choke_groups.end(), [name](auto& g) { return name == g->name(); });
 
-  if (itr == choke_base_type::end())
+  if (itr == m_choke_groups.end())
     throw input_error("Choke group not found.");
 
-  return *itr;
+  return itr->get();
 }
 
 int
 ResourceManager::group_index_of(const std::string& name) {
-  auto itr = std::find_if(choke_base_type::begin(), choke_base_type::end(),
-                          [name](choke_group* g) { return name == g->name(); });
+  auto itr = std::find_if(m_choke_groups.begin(), m_choke_groups.end(), [name](auto& g) { return name == g->name(); });
 
-  if (itr == choke_base_type::end())
+  if (itr == m_choke_groups.end())
     throw input_error("Choke group not found.");
 
-  return std::distance(choke_base_type::begin(), itr);
+  return std::distance(m_choke_groups.begin(), itr);
 }
 
 void
 ResourceManager::set_priority(iterator itr, uint16_t pri) {
-  LT_LOG_ITR("set priority: %" PRIu16, 0);
+  LT_LOG_DEBUG_ITR("set priority : %" PRIu16, 0);
 
   itr->set_priority(pri);
 }
@@ -195,19 +202,20 @@ ResourceManager::set_group(iterator itr, uint16_t grp) {
   if (itr->group() == grp)
     return;
 
-  if (grp >= choke_base_type::size())
+  if (grp >= m_choke_groups.size())
     throw input_error("Choke group not found.");
 
-  choke_queue::move_connections(itr->download()->choke_group()->up_queue(), choke_base_type::at(grp)->up_queue(), itr->download(), itr->download()->up_group_entry());
-  choke_queue::move_connections(itr->download()->choke_group()->down_queue(), choke_base_type::at(grp)->down_queue(), itr->download(), itr->download()->down_group_entry());
+  choke_queue::move_connections(itr->download()->choke_group()->up_queue(), m_choke_groups.at(grp)->up_queue(), itr->download(), itr->download()->up_group_entry());
+  choke_queue::move_connections(itr->download()->choke_group()->down_queue(), m_choke_groups.at(grp)->down_queue(), itr->download(), itr->download()->down_group_entry());
 
-  auto group_src = choke_base_type::begin() + itr->group();
-  auto group_dest = choke_base_type::begin() + grp;
+  auto group_src = m_choke_groups.begin() + itr->group();
+  auto group_dest = m_choke_groups.begin() + grp;
 
   resource_manager_entry entry = *itr;
+
   entry.set_group(grp);
-  entry.download()->set_choke_group(choke_base_type::at(entry.group()));
-  
+  entry.download()->set_choke_group(m_choke_groups.at(entry.group()).get());
+
   base_type::erase(itr);
   base_type::insert(find_group_end(entry.group()), entry);
 
@@ -244,7 +252,7 @@ ResourceManager::set_max_download_unchoked(unsigned int m) {
 // possibly multiple calls of this function.
 void
 ResourceManager::receive_upload_unchoke(int num) {
-  LT_LOG_THIS("adjusting upload unchoked slots; current:%u adjusted:%i", m_currentlyUploadUnchoked, num);
+  LT_LOG_DEBUG("adjusting upload unchoked : current:%u adjusted:%i", m_currentlyUploadUnchoked, num);
 
   if (static_cast<int>(m_currentlyUploadUnchoked) + num < 0)
     throw internal_error("ResourceManager::receive_upload_unchoke(...) received an invalid value.");
@@ -254,7 +262,7 @@ ResourceManager::receive_upload_unchoke(int num) {
 
 void
 ResourceManager::receive_download_unchoke(int num) {
-  LT_LOG_THIS("adjusting download unchoked slots; current:%u adjusted:%i", m_currentlyDownloadUnchoked, num);
+  LT_LOG_DEBUG("adjusting download unchoked : current:%u adjusted:%i", m_currentlyDownloadUnchoked, num);
 
   if (static_cast<int>(m_currentlyDownloadUnchoked) + num < 0)
     throw internal_error("ResourceManager::receive_download_unchoke(...) received an invalid value.");
@@ -282,22 +290,22 @@ void
 ResourceManager::receive_tick() {
   validate_group_iterators();
 
-  m_currentlyUploadUnchoked   += balance_unchoked(choke_base_type::size(), m_maxUploadUnchoked, true);
-  m_currentlyDownloadUnchoked += balance_unchoked(choke_base_type::size(), m_maxDownloadUnchoked, false);
+  m_currentlyUploadUnchoked   += balance_unchoked(m_choke_groups.size(), m_maxUploadUnchoked, true);
+  m_currentlyDownloadUnchoked += balance_unchoked(m_choke_groups.size(), m_maxDownloadUnchoked, false);
 
-  auto up_unchoked = std::accumulate(choke_base_type::begin(), choke_base_type::end(), 0U, [](auto sum, auto group) {
+  auto up_unchoked = std::accumulate(m_choke_groups.begin(), m_choke_groups.end(), 0U, [](auto sum, auto& group) {
     return sum + group->up_unchoked();
   });
 
-  auto down_unchoked = std::accumulate(choke_base_type::begin(), choke_base_type::end(), 0U, [](auto sum, auto group) {
+  auto down_unchoked = std::accumulate(m_choke_groups.begin(), m_choke_groups.end(), 0U, [](auto sum, auto& group) {
     return sum + group->down_unchoked();
   });
 
   if (m_currentlyUploadUnchoked != up_unchoked)
-    throw torrent::internal_error("m_currentlyUploadUnchoked != choke_base_type::back()->up_queue()->size_unchoked()");
+    throw torrent::internal_error("m_currentlyUploadUnchoked != m_choke_groups.back()->up_queue()->size_unchoked()");
 
   if (m_currentlyDownloadUnchoked != down_unchoked)
-    throw torrent::internal_error("m_currentlyDownloadUnchoked != choke_base_type::back()->down_queue()->size_unchoked()");
+    throw torrent::internal_error("m_currentlyDownloadUnchoked != m_choke_groups.back()->down_queue()->size_unchoked()");
 }
 
 unsigned int
@@ -314,9 +322,9 @@ ResourceManager::balance_unchoked(unsigned int weight, unsigned int max_unchoked
   int change = 0;
 
   if (max_unchoked == 0) {
-    auto group_itr = choke_base_type::begin();
+    auto group_itr = m_choke_groups.begin();
 
-    while (group_itr != choke_base_type::end()) {
+    while (group_itr != m_choke_groups.end()) {
       choke_queue* cm = is_up ? (*group_itr)->up_queue() : (*group_itr)->down_queue();
 
       change += cm->cycle(std::numeric_limits<unsigned int>::max());
@@ -336,7 +344,9 @@ ResourceManager::balance_unchoked(unsigned int weight, unsigned int max_unchoked
   // that won't work as they need to choke peers once their priority
   // is turned off.
 
-  auto choke_groups = std::vector<choke_group*>(choke_base_type::begin(), choke_base_type::end());
+  auto choke_groups = std::vector<choke_group*>(m_choke_groups.size());
+
+  std::transform(m_choke_groups.begin(), m_choke_groups.end(), choke_groups.begin(), [](auto& g) { return g.get(); });
 
   // Start with the group requesting fewest slots (relative to weight)
   // so that we only need to iterate through the list once allocating
@@ -346,11 +356,11 @@ ResourceManager::balance_unchoked(unsigned int weight, unsigned int max_unchoked
   if (is_up) {
     std::sort(choke_groups.begin(), choke_groups.end(), [](auto lhs, auto rhs) { return lhs->up_requested() < rhs->up_requested(); });
 
-    LT_LOG_THIS("balancing upload unchoked slots; current_unchoked:%u change:%i max_unchoked:%u", m_currentlyUploadUnchoked, change, max_unchoked);
+    LT_LOG_DEBUG("balancing upload unchoked : current_unchoked:%u change:%i max_unchoked:%u", m_currentlyUploadUnchoked, change, max_unchoked);
   } else {
     std::sort(choke_groups.begin(), choke_groups.end(), [](auto lhs, auto rhs) { return lhs->down_requested() < rhs->down_requested(); });
 
-    LT_LOG_THIS("balancing download unchoked slots; current_unchoked:%u change:%i max_unchoked:%u", m_currentlyDownloadUnchoked, change, max_unchoked);
+    LT_LOG_DEBUG("balancing download unchoked : current_unchoked:%u change:%i max_unchoked:%u", m_currentlyDownloadUnchoked, change, max_unchoked);
   }
 
   for (const auto& group : choke_groups) {

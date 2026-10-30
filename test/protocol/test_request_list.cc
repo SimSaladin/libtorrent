@@ -3,12 +3,15 @@
 #include "test/protocol/test_request_list.h"
 
 #include "download/delegator.h"
+#include "protocol/extensions.h"
 #include "protocol/peer_chunks.h"
 #include "protocol/request_list.h"
 #include "test/helpers/network.h"
 #include "test/helpers/test_main_thread.h"
+#include "torrent/data/block_list.h"
 #include "torrent/exceptions.h"
 #include "torrent/peer/peer_info.h"
+#include "torrent/utils/functional.h"
 
 CPPUNIT_TEST_SUITE_REGISTRATION(TestRequestList);
 
@@ -49,7 +52,7 @@ struct RequestListGuard {
 
 #define SETUP_DELEGATOR(fpc_prefix)                                     \
   auto delegator = std::make_unique<torrent::Delegator>();              \
-  delegator->slot_chunk_find() = std::bind(&fpc_prefix ## _find_peer_chunk, std::placeholders::_1, std::placeholders::_2); \
+  delegator->slot_chunk_find() = std::bind(&fpc_prefix ## _find_peer_chunk, std::placeholders::_1); \
   delegator->slot_chunk_size() = std::bind(&chunk_index_size, std::placeholders::_1); \
   delegator->transfer_list()->slot_canceled()  = std::bind(&transfer_list_void); \
   delegator->transfer_list()->slot_queued()    = std::bind(&transfer_list_void); \
@@ -115,11 +118,11 @@ struct RequestListGuard {
 // Basic tests:
 //
 
-static uint32_t
-basic_find_peer_chunk([[maybe_unused]] torrent::PeerChunks* peerChunk, [[maybe_unused]] bool highPriority) {
+static torrent::ChunkSelector::find_result
+basic_find_peer_chunk([[maybe_unused]] torrent::PeerChunks* peerChunk) {
   static int next_index = 0;
 
-  return next_index++;
+  return {static_cast<uint32_t>(next_index++), true};
 }
 
 void
@@ -131,10 +134,57 @@ TestRequestList::test_basic() {
 
   VERIFY_QUEUE_SIZES(0, 0, 0, 0);
 
-  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 0) == 2);
-  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 10) == 12);
+  const uint32_t none = torrent::ProtocolExtension::default_peer_request_queue_size;
+
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 0, none) == 2);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 10, none) == 12);
 
   CPPUNIT_ASSERT(request_list->transfer() == NULL);
+}
+
+// A peer queues a limited number of requests, advertised as "reqq" in the handshake.
+// The pipe should never grow beyond that (or the default, for a peer that sent none)
+void
+TestRequestList::test_pipe_size_limit() {
+  SETUP_ALL(basic);
+
+  const uint32_t none = torrent::ProtocolExtension::default_peer_request_queue_size;
+
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 10, none) == 12);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 2400, none) == 498);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 100000, none) == 500);
+
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 100000, 255) == 255);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 10, 255) == 12);
+
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 100000, 2048) == 2048);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 2400, 2048) == 498);
+
+  // Our own 2048 limit on requests from the peer does not cap requests to it.
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 100000, 5000) == 5000);
+  CPPUNIT_ASSERT(request_list->calculate_pipe_size(1024 * 2400, 5000) == 498);
+}
+
+void
+TestRequestList::test_selected_priority() {
+  SETUP_ALL(basic);
+
+  auto scope_guard = torrent::utils::scope_guard([&]() {
+      CLEAR_TRANSFERS();
+    });
+
+  delegator->slot_chunk_find() = [](torrent::PeerChunks*) {
+    return torrent::ChunkSelector::find_result{0, false};
+  };
+
+  auto pieces = request_list->delegate(1);
+  CPPUNIT_ASSERT(pieces.size() == 1);
+
+  auto itr = delegator->transfer_list()->find(0);
+  CPPUNIT_ASSERT(itr != delegator->transfer_list()->end());
+  CPPUNIT_ASSERT((*itr)->priority() == torrent::PRIORITY_NORMAL);
+
+  request_list->clear();
 }
 
 void
@@ -197,6 +247,29 @@ void
 TestRequestList::test_choke_normal() {
   SETUP_ALL_WITH_3(basic);
   VERIFY_QUEUE_SIZES(3, 0, 0, 0);
+
+  request_list->choked();
+
+  test_main_thread->test_set_cached_time(1s);
+  test_main_thread->test_process_events_without_cached_time();
+  VERIFY_QUEUE_SIZES(0, 0, 0, 3);
+
+  test_main_thread->test_set_cached_time(1s + 6s);
+  test_main_thread->test_process_events_without_cached_time();
+  VERIFY_QUEUE_SIZES(0, 0, 0, 0);
+
+  CLEAR_TRANSFERS();
+}
+
+void
+TestRequestList::test_choke_stalled() {
+  SETUP_ALL_WITH_3(basic);
+  VERIFY_QUEUE_SIZES(3, 0, 0, 0);
+
+  // A peer that stalls before it chokes leaves the queued and unordered
+  // buckets empty, which is the state choked() has to act on.
+  request_list->stall_prolonged();
+  VERIFY_QUEUE_SIZES(0, 0, 3, 0);
 
   request_list->choked();
 

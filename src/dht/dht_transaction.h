@@ -77,7 +77,7 @@ public:
 class DhtTransactionPacket {
 public:
   // transaction packet
-  DhtTransactionPacket(const sockaddr* s, const DhtMessage& d, unsigned int id, std::shared_ptr<DhtTransaction> t);
+  DhtTransactionPacket(const sockaddr* s, const DhtMessage& d, unsigned int id, uint64_t transaction_key);
   // non-transaction packet
   DhtTransactionPacket(const sockaddr* s, const DhtMessage& d);
   ~DhtTransactionPacket() = default;
@@ -95,8 +95,7 @@ public:
   int                 id() const                { return m_id; }
   int                 age() const               { return has_transaction() ? 0 : this_thread::cached_seconds().count() + m_id; }
 
-  const auto*         transaction() const       { return m_transaction.get(); }
-  auto*               transaction()             { return m_transaction.get(); }
+  uint64_t            transaction_key() const   { return m_transaction_key; }
 
 private:
   DhtTransactionPacket(const DhtTransactionPacket&) = delete;
@@ -108,8 +107,7 @@ private:
   std::unique_ptr<char[]> m_data;
   size_t                  m_length{};
   int                     m_id{};
-
-  std::shared_ptr<DhtTransaction> m_transaction;
+  uint64_t                m_transaction_key{};
 };
 
 // DHT Transaction classes. DhtTransaction and DhtTransactionSearch
@@ -187,7 +185,7 @@ public:
   void                complete(bool success);
 
 protected:
-  DhtTransactionSearch(int quick_timeout, int timeout, dht::DhtSearch::const_accessor& node);
+  DhtTransactionSearch(int quick_timeout, int timeout, std::shared_ptr<dht::DhtSearch> search, dht::DhtSearch::const_accessor& node);
 
 private:
   dht::DhtSearch::const_accessor  m_node;
@@ -205,16 +203,16 @@ public:
 
 class DhtTransactionFindNode : public DhtTransactionSearch {
 public:
-  DhtTransactionFindNode(dht::DhtSearch::const_accessor& node)
-    : DhtTransactionSearch(4, 30, node) { }
+  DhtTransactionFindNode(std::shared_ptr<dht::DhtSearch> search, dht::DhtSearch::const_accessor& node)
+    : DhtTransactionSearch(4, 30, std::move(search), node) { }
 
   transaction_type           type() const override;
 };
 
 class DhtTransactionGetPeers : public DhtTransactionSearch {
 public:
-  DhtTransactionGetPeers(dht::DhtSearch::const_accessor& node)
-    : DhtTransactionSearch(-1, 30, node) { }
+  DhtTransactionGetPeers(std::shared_ptr<dht::DhtSearch> search, dht::DhtSearch::const_accessor& node)
+    : DhtTransactionSearch(-1, 30, std::move(search), node) { }
 
   transaction_type           type() const override;
 };

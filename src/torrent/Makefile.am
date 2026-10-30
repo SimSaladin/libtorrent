@@ -37,18 +37,12 @@ libtorrent_torrent_la_SOURCES = \
 \
 	net/address_info.cc \
 	net/address_info.h \
-	net/connection_state.h \
 	net/fd.cc \
 	net/fd.h \
 	net/http_get.cc \
 	net/http_get.h \
 	net/http_stack.cc \
 	net/http_stack.h \
-	net/network_config.cc \
-	net/network_config.h \
-	net/poll.h \
-	net/poll_epoll.cc \
-	net/poll_kqueue.cc \
 	net/resolver.cc \
 	net/resolver.h \
 	net/socket_address.cc \
@@ -71,10 +65,36 @@ libtorrent_torrent_la_SOURCES = \
 	peer/peer_list.cc \
 	peer/peer_list.h \
 \
+	runtime/client_config.cc \
+	runtime/client_config.h \
+	runtime/memory_manager.cc \
+	runtime/memory_manager.h \
+	runtime/network_config.cc \
+	runtime/network_config.h \
 	runtime/network_manager.cc \
 	runtime/network_manager.h \
+	runtime/proxy_manager.cc \
+	runtime/proxy_manager.h \
+	runtime/runtime.cc \
+	runtime/runtime.h \
 	runtime/socket_manager.cc \
 	runtime/socket_manager.h \
+\
+	system/callbacks.h \
+	system/common.h \
+	system/event.cc \
+	system/event.h \
+	system/poll.h \
+	system/poll_epoll.cc \
+	system/poll_kqueue.cc \
+	system/scheduler.cc \
+	system/scheduler.h \
+	system/spawn_process.cc \
+	system/spawn_process.h \
+	system/system.cc \
+	system/thread.cc \
+	system/thread.h \
+	system/types.h \
 \
 	tracker/dht_controller.cc \
 	tracker/dht_controller.h \
@@ -82,15 +102,21 @@ libtorrent_torrent_la_SOURCES = \
 	tracker/manager.h \
 	tracker/tracker.cc \
 	tracker/tracker.h \
+	tracker/tracker_state.cc \
 	tracker/tracker_state.h \
 	tracker/wrappers.cc \
 	tracker/wrappers.h \
+\
+	types/string_utf8.cc \
+	types/string_utf8.h \
 \
 	utils/chrono.h \
 	utils/directory_events.cc \
 	utils/directory_events.h \
 	utils/extents.h \
 	utils/file_stat.h \
+	utils/functional.h \
+	utils/linked_unordered_set.h \
 	utils/log.cc \
 	utils/log.h \
 	utils/log_buffer.cc \
@@ -102,32 +128,19 @@ libtorrent_torrent_la_SOURCES = \
 	utils/ranges.h \
 	utils/resume.cc \
 	utils/resume.h \
-	utils/scheduler.cc \
-	utils/scheduler.h \
-	utils/signal_bitfield.cc \
-	utils/signal_bitfield.h \
+	utils/scope.h \
 	utils/string_manip.cc \
 	utils/string_manip.h \
-	utils/thread.cc \
-	utils/thread.h \
 	utils/unordered_vector.h \
 	utils/uri_parser.cc \
 	utils/uri_parser.h \
 \
 	bitfield.cc \
 	bitfield.h \
-	chunk_manager.cc \
-	chunk_manager.h \
 	common.h \
-	connection_manager.cc \
-	connection_manager.h \
 	download.cc \
 	download.h \
 	download_info.h \
-	error.cc \
-	error.h \
-	event.cc \
-	event.h \
 	exceptions.cc \
 	exceptions.h \
 	hash_string.h \
@@ -170,17 +183,15 @@ libtorrent_torrent_download_include_HEADERS = \
 	download/choke_queue.h \
 	download/download_manager.h \
 	download/group_entry.h \
-	download/resource_manager.h
+	download/resource_manager.h \
+	download/types.h
 
 libtorrent_torrent_net_includedir = $(includedir)/torrent/net
 libtorrent_torrent_net_include_HEADERS = \
 	net/address_info.h \
-	net/connection_state.h \
 	net/fd.h \
 	net/http_get.h \
 	net/http_stack.h \
-	net/network_config.h \
-	net/poll.h \
 	net/resolver.h \
 	net/socket_address.h \
 	net/socket_address_key.h \
@@ -198,8 +209,24 @@ libtorrent_torrent_peer_include_HEADERS = \
 
 libtorrent_torrent_runtime_includedir = $(includedir)/torrent/runtime
 libtorrent_torrent_runtime_include_HEADERS = \
+	runtime/client_config.h \
+	runtime/memory_manager.h \
+	runtime/network_config.h \
 	runtime/network_manager.h \
+	runtime/proxy_manager.h \
+	runtime/runtime.h \
 	runtime/socket_manager.h
+
+libtorrent_torrent_system_includedir = $(includedir)/torrent/system
+libtorrent_torrent_system_include_HEADERS = \
+	system/callbacks.h \
+	system/common.h \
+	system/event.h \
+	system/poll.h \
+	system/scheduler.h \
+	system/spawn_process.h \
+	system/thread.h \
+	system/types.h
 
 libtorrent_torrent_tracker_includedir = $(includedir)/torrent/tracker
 libtorrent_torrent_tracker_include_HEADERS = \
@@ -209,36 +236,34 @@ libtorrent_torrent_tracker_include_HEADERS = \
 	tracker/tracker_state.h \
 	tracker/wrappers.h
 
+libtorrent_torrent_types_includedir = $(includedir)/torrent/types
+libtorrent_torrent_types_include_HEADERS = \
+	types/string_utf8.h
+
 libtorrent_torrent_utils_includedir = $(includedir)/torrent/utils
 libtorrent_torrent_utils_include_HEADERS = \
 	utils/chrono.h \
 	utils/directory_events.h \
 	utils/extents.h \
 	utils/file_stat.h \
+	utils/functional.h \
 	utils/log.h \
 	utils/log_buffer.h \
 	utils/option_strings.h \
 	utils/random.h \
 	utils/ranges.h \
 	utils/resume.h \
-	utils/scheduler.h \
-	utils/signal_bitfield.h \
 	utils/string_manip.h \
-	utils/thread.h \
 	utils/unordered_vector.h \
 	utils/uri_parser.h
 
 libtorrent_torrent_includedir = $(includedir)/torrent
 libtorrent_torrent_include_HEADERS = \
 	bitfield.h \
-	chunk_manager.h \
 	common.h \
-	connection_manager.h \
 	download.h \
 	download_info.h \
-	error.h \
 	exceptions.h \
-	event.h \
 	hash_string.h \
 	object.h \
 	object_raw_bencode.h \

@@ -10,22 +10,25 @@
 #include "torrent/exceptions.h"
 #include "torrent/net/resolver.h"
 #include "torrent/net/socket_address.h"
+#include "torrent/system/callbacks.h"
 #include "torrent/tracker/dht_controller.h"
 #include "torrent/utils/log.h"
 #include "utils/sha1.h"
 
 #define LT_LOG_THIS(log_fmt, ...)                                       \
-  lt_log_print_hash(torrent::LOG_DHT_ROUTER, this->id(), "dht_router", log_fmt, __VA_ARGS__);
+  lt_log_print_hash(LOG_DHT_ROUTER, this->id(), "dht_router : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
 HashString DhtRouter::zero_id;
 
-DhtRouter::DhtRouter(const Object& cache) :
-  DhtNode(zero_id, sa_make_inet_any().get()), // actual ID is set later
-  m_server(this),
-  m_curToken(random()),
-  m_prevToken(random()) {
+DhtRouter::DhtRouter(tracker::DhtController* controller, const Object& cache)
+  : DhtNode(zero_id, sa_make_inet_any().get()), // actual ID is set later
+    m_controller(controller),
+    m_server(this),
+    m_curToken(random()),
+    m_prevToken(random()),
+    m_resolver_callback_id(system::make_callback_id()) {
 
   HashString ones_id;
 
@@ -55,6 +58,7 @@ DhtRouter::DhtRouter(const Object& cache) :
   LT_LOG_THIS("creating", 0);
 
   set_bucket(new DhtBucket(zero_id, ones_id));
+
   m_routingTable.emplace(bucket()->id_range_end(), bucket());
 
   if (cache.has_key("nodes")) {
@@ -75,7 +79,12 @@ DhtRouter::DhtRouter(const Object& cache) :
 
     if (cache.has_key("contacts")) {
       for (const auto& contact : cache.get_key_list("contacts")) {
-        auto litr = contact.as_list().begin();
+        const Object::list_type& list = contact.as_list();
+
+        if (list.size() != 2)
+          throw bencode_error("Loading cache: Invalid contact.");
+
+        auto litr = list.begin();
         auto host = litr->as_string();
         auto port = std::next(litr)->as_value();
 
@@ -104,6 +113,8 @@ DhtRouter::start(int port) {
 
   m_server.start(port);
 
+  m_controller->set_nodes_populated(check_nodes_populated());
+
   // Set timeout slot and schedule it to be called immediately for initial bootstrapping if
   // necessary.
   m_task_timeout.slot() = [this] { receive_timeout_bootstrap(); };
@@ -118,7 +129,7 @@ DhtRouter::stop() {
 
   LT_LOG_THIS("stopping", 0);
 
-  this_thread::resolver()->cancel(this);
+  this_thread::resolver()->cancel(m_resolver_callback_id);
   this_thread::scheduler()->erase(&m_task_timeout);
 
   m_server.stop();
@@ -126,14 +137,14 @@ DhtRouter::stop() {
 
 // Start a DHT get_peers and announce_peer request.
 void
-DhtRouter::announce(const HashString& info_hash, TrackerDht* tracker) {
+DhtRouter::announce(const HashString& info_hash, std::weak_ptr<TrackerDht> tracker) {
   m_server.announce(*find_bucket(info_hash)->second, info_hash, tracker);
 }
 
 // Cancel any running requests from the given tracker.
 // If info or tracker is not NULL, only cancel matching requests.
 void
-DhtRouter::cancel_announce(const HashString* info_hash, const TrackerDht* tracker) {
+DhtRouter::cancel_announce(const HashString& info_hash, std::weak_ptr<TrackerDht> tracker) {
   m_server.cancel_announce(info_hash, tracker);
 }
 
@@ -144,12 +155,12 @@ DhtRouter::get_tracker(const HashString& hash, bool create) {
   if (itr != m_trackers.end())
     return itr->second;
 
-  if (!create)
+  if (!create || m_trackers.size() >= max_trackers)
     return NULL;
 
-  auto [tr, ins] = m_trackers.emplace(hash, new DhtTracker());
+  auto [tr, inserted] = m_trackers.emplace(hash, new DhtTracker());
 
-  if (!ins)
+  if (!inserted)
     throw internal_error("DhtRouter::get_tracker did not actually insert tracker.");
 
   return tr->second;
@@ -228,8 +239,10 @@ DhtRouter::contact(const sockaddr* sa, int port) {
   if (sa_tmp->sa_family != AF_INET)
     return;
 
-  if (sap_is_any(sa_tmp))
-    throw input_error("DhtRouter::contact() called with any address.");
+  if (sap_is_any(sa_tmp)) {
+    LT_LOG_THIS("not contacting node, any address : %s", sa_addr_str(sa_tmp.get()).c_str());
+    return;
+  }
 
   sap_set_port(sa_tmp, port);
 
@@ -322,18 +335,6 @@ DhtRouter::node_inactive(const HashString& id, const sockaddr* sa) {
   return itr.node();
 }
 
-// We sent a query to the given node ID, but received a reply from a different
-// node ID, that means the address of the original ID is invalid now.
-void
-DhtRouter::node_invalid(const HashString& id) {
-  DhtNode* node = get_node(id);
-
-  if (node == NULL || node == this)
-    return;
-
-  delete_node(m_nodes.find(&node->id()));
-}
-
 Object*
 DhtRouter::store_cache(Object* container) const {
   container->insert_key("self_id", str());
@@ -398,7 +399,9 @@ DhtRouter::receive_timeout_bootstrap() {
   // we have enough nodes in our routing table. After we have 32 nodes, we switch
   // to a less aggressive non-bootstrap mode of collecting nodes that contact us
   // and through doing normal torrent announces.
-  if (m_nodes.size() < num_bootstrap_complete) {
+  m_controller->set_nodes_populated(check_nodes_populated());
+
+  if (!check_nodes_populated()) {
     if (!m_contacts.has_value())
       throw internal_error("DhtRouter::receive_timeout_bootstrap called without contact list.");
 
@@ -476,9 +479,56 @@ DhtRouter::receive_timeout() {
     ++itr;
   }
 
+  evict_stale_trackers();
+
+  m_controller->set_nodes_populated(check_nodes_populated());
+
   m_server.update();
 
   m_numRefresh++;
+}
+
+// Announces that keep every entry fresh would otherwise lock new info hashes
+// out of a full table, so make room by dropping the stalest entries.
+void
+DhtRouter::evict_stale_trackers() {
+  if (m_trackers.size() < max_trackers ||
+      this_thread::cached_seconds() - m_lastTrackerEvict < std::chrono::seconds(timeout_tracker_evict))
+    return;
+
+  // Keep the num_tracker_evict least recently announced trackers in a max-heap
+  // by last-seen time, so its front is the newest of them: an entry older than
+  // that front takes its place, and the heap ends holding the oldest to drop.
+  using tracker_age = std::pair<uint32_t, HashString>;
+  auto newer = [](const tracker_age& a, const tracker_age& b) { return a.first < b.first; };
+
+  std::vector<tracker_age> stale;
+  stale.reserve(num_tracker_evict);
+
+  for (const auto& [hash, tracker] : m_trackers) {
+    tracker_age entry{tracker->last_seen(), hash};
+
+    if (stale.size() < num_tracker_evict) {
+      stale.push_back(entry);
+      std::push_heap(stale.begin(), stale.end(), newer);
+
+    } else if (entry.first < stale.front().first) {
+      std::pop_heap(stale.begin(), stale.end(), newer);
+      stale.back() = entry;
+      std::push_heap(stale.begin(), stale.end(), newer);
+    }
+  }
+
+  for (const auto& [_, hash] : stale) {
+    auto itr = m_trackers.find(hash);
+
+    delete itr->second;
+    m_trackers.erase(itr);
+  }
+
+  m_lastTrackerEvict = this_thread::cached_seconds();
+
+  LT_LOG_THIS("evicted stale trackers : count:%zu", stale.size());
 }
 
 char*
@@ -613,7 +663,7 @@ DhtRouter::bootstrap() {
         contact(sa.get(), port);
     };
 
-    this_thread::resolver()->resolve_specific(this, m_contacts->back().first, AF_INET, f);
+    this_thread::resolver()->resolve_specific(m_resolver_callback_id, m_contacts->back().first, AF_INET, f);
 
     m_contacts->pop_back();
   }

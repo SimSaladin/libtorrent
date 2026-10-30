@@ -4,9 +4,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   Ubuntu:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: Prepare
       run: |
@@ -97,15 +100,48 @@ jobs:
       - uses: vmactions/netbsd-vm@v1
         with:
           prepare: |
-            /usr/sbin/pkg_add \
+            # 1. Force export the correct package repository path matching your OS version
+            export OS_VERSION=$(uname -r | cut -d_ -f1)
+            export ARCH=$(uname -p)
+            export PKG_PATH="https://cdn.netbsd.org/pub/pkgsrc/packages/NetBSD/${ARCH}/${OS_VERSION}/All/"
+
+            # 2. Clean up conflicting legacy GCC artifacts
+            rm -rf /usr/pkg/gcc10/libexec/gcc/x86_64--netbsd/10.5.0/cc1plus
+
+            # 3. Update the package database and install pkgin if not present
+            /usr/sbin/pkg_add -U pkgin || true
+
+            # 4. Install packages using pkgin (handles dependencies and upgrades automatically)
+            # NOTE: 'openssl' is removed because it is provided by the NetBSD base system.
+            pkgin -y update
+            pkgin -y install \
               automake \
               autoconf \
               cppunit \
               curl \
               libtool \
+              pkgconf \
               openssl \
-              pkgconf
+              gcc14
+
+            # /usr/sbin/pkg_add -v \
+            #   automake \
+            #   autoconf \
+            #   cppunit \
+            #   curl \
+            #   libtool \
+            #   openssl \
+            #   pkgconf \
+            #   gcc14
           run: |
+            export CC=gcc
+            export CXX=g++
+            export PATH="/usr/pkg/gcc14/bin:/usr/pkg/bin:/usr/pkg/sbin:$PATH"
+
+            export CPPFLAGS="-I/usr/pkg/include"
+            export LDFLAGS="-L/usr/pkg/lib -Wl,-R/usr/pkg/lib"
+            export PKG_CONFIG_PATH="/usr/pkg/lib/pkgconfig"
+
             autoreconf -fiv
             ./configure
             make
@@ -115,24 +151,27 @@ jobs:
     needs: Ubuntu
     runs-on: ubuntu-latest
     env:
+      # TODO: Try without this:
       TEST_IGNORE_SIGNAL_INTERRUPT_LATENCY: YES
-      AUTOCONF_VERSION: 2.72
+      AUTOCONF_VERSION: 2.65
       AUTOMAKE_VERSION: 1.18
     steps:
       - uses: actions/checkout@v4
       - uses: vmactions/openbsd-vm@v1
         with:
-          release: "7.8"
+          # Upgraded to utilize native EVFILT_USER features in 7.9 release:
+          release: "7.9"
           envs: 'TEST_IGNORE_SIGNAL_INTERRUPT_LATENCY AUTOCONF_VERSION AUTOMAKE_VERSION'
           prepare: |
-            pkg_add \
-              automake-1.18 \
-              autoconf-2.72p0 \
+            pkg_add -v -I \
+              automake-1.18.1 \
+              autoconf-2.65p1 \
               cppunit \
               curl \
               libtool \
-              openssl-3.6.0p0v0
+              openssl
           run: |
+            export PATH="/usr/local/bin:$PATH"
             ulimit -n 1000
             autoreconf -fiv
             ./configure --disable-mincore
@@ -163,27 +202,22 @@ jobs:
 #            make check
 
   Alpine:
+    name: Alpine (x86_64)
     needs: Ubuntu
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        # platform: ['x86_64', 'x86']
-        platform: ['x86_64'] # Disabled x86 to reduce GitHub resource usage
-    defaults:
-      run:
-        shell: alpine.sh {0}
     steps:
       - uses: actions/checkout@v4
-      - uses: jirutka/setup-alpine@v1
-        with:
-          branch: edge
-          arch: ${{matrix.platform}}
-          packages: >
-            build-base automake autoconf cppunit-dev curl-dev libtool linux-headers openssl-dev pkgconf zlib-dev
       - name: Compile and Test
         run: |
-          autoreconf -fiv
-          ./configure
-          make
-          make check
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            alpine:edge \
+            sh -exc '
+              apk add --no-cache build-base automake autoconf cppunit-dev curl-dev libtool linux-headers openssl-dev pkgconf zlib-dev
+              autoreconf -fiv
+              ./configure
+              grep LT_SMP_CACHE_BYTES config.h
+              make
+              make check
+            '

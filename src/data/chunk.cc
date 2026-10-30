@@ -48,21 +48,56 @@
 #include "chunk_iterator.h"
 
 namespace {
-jmp_buf jmp_disk_full;
+thread_local sigjmp_buf            jmp_disk_full;
+thread_local volatile sig_atomic_t jmp_disk_full_armed;
+
+struct sigaction bus_handler_oldact;
 
 void
-bus_handler(int, siginfo_t* si, void*) {
-  if (si && si->si_code == BUS_ADRERR)
-    longjmp(jmp_disk_full, 1);
+bus_handler(int signum, siginfo_t*, void*) {
+  if (!jmp_disk_full_armed) {
+    struct sigaction sa = bus_handler_oldact;
+
+    if ((sa.sa_flags & SA_SIGINFO) == 0 && sa.sa_handler == SIG_IGN)
+      sa.sa_handler = SIG_DFL;
+
+    sigaction(signum, &sa, nullptr);
+    return;
+  }
+
+  jmp_disk_full_armed = 0;
+  siglongjmp(jmp_disk_full, 1);
 }
+
+class bus_handler_guard {
+public:
+  bus_handler_guard() {
+    struct sigaction sa{};
+
+    sa.sa_sigaction = &bus_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigfillset(&sa.sa_mask);
+
+    sigaction(SIGBUS, &sa, &m_oldact);
+
+    if ((m_oldact.sa_flags & SA_SIGINFO) == 0 || m_oldact.sa_sigaction != &bus_handler)
+      bus_handler_oldact = m_oldact;
+  }
+
+  ~bus_handler_guard() {
+    jmp_disk_full_armed = 0;
+    sigaction(SIGBUS, &m_oldact, nullptr);
+  }
+
+  bus_handler_guard(const bus_handler_guard&) = delete;
+  bus_handler_guard& operator=(const bus_handler_guard&) = delete;
+
+private:
+  struct sigaction m_oldact;
+};
 } // namespace
 
 namespace torrent {
-
-bool
-Chunk::is_all_valid() const {
-  return !empty() && std::all_of(begin(), end(), std::mem_fn(&ChunkPart::is_valid));
-}
 
 void
 Chunk::clear() {
@@ -200,7 +235,7 @@ Chunk::preload(uint32_t position, uint32_t length, bool useAdvise) {
 
     } else {
       for (char* first = static_cast<char*>(data.first), *last = static_cast<char*>(data.first) + data.second; first < last; first += 4096)
-        [[maybe_unused]] volatile char touchChunk = *static_cast<char*>(data.first);
+        [[maybe_unused]] volatile char touchChunk = *first;
 
       // Make sure we touch the last page in the range.
       [[maybe_unused]] volatile char ouchChunk = *(static_cast<char*>(data.first) + data.second - 1);
@@ -213,7 +248,7 @@ Chunk::preload(uint32_t position, uint32_t length, bool useAdvise) {
 // matching.
 bool
 Chunk::to_buffer(void* buffer, uint32_t position, uint32_t length) {
-  if (position + length > m_chunkSize)
+  if (position > m_chunkSize || length > m_chunkSize - position)
     throw internal_error("Chunk::to_buffer(...) position + length > m_chunkSize.");
 
   if (length == 0)
@@ -236,13 +271,7 @@ Chunk::to_buffer(void* buffer, uint32_t position, uint32_t length) {
 // matching.
 bool
 Chunk::from_buffer(const void* buffer, uint32_t position, uint32_t length) {
-  struct sigaction sa{}, oldact;
-  sa.sa_sigaction = &bus_handler;
-  sa.sa_flags = SA_SIGINFO;
-  sigfillset(&sa.sa_mask);
-  sigaction(SIGBUS, &sa, &oldact);
-
-  if (position + length > m_chunkSize)
+  if (position > m_chunkSize || length > m_chunkSize - position)
     throw internal_error("Chunk::from_buffer(...) position + length > m_chunkSize.");
 
   if (length == 0)
@@ -251,19 +280,23 @@ Chunk::from_buffer(const void* buffer, uint32_t position, uint32_t length) {
   Chunk::data_type data;
   ChunkIterator itr(this, position, position + length);
 
-  if (setjmp(jmp_disk_full) == 0) {
+  bus_handler_guard guard;
+
+  if (sigsetjmp(jmp_disk_full, 1) == 0) {
+      jmp_disk_full_armed = 1;
+
       do {
         data = itr.data();
         std::memcpy(data.first, buffer, data.second);
 
         buffer = static_cast<const char*>(buffer) + data.second;
       } while (itr.next());
+
+      jmp_disk_full_armed = 0;
   } else {
-      throw storage_error("no space left on disk");
+      throw storage_error("failed to write chunk, the file was truncated or the disk is full");
   }
 
-  sigaction(SIGBUS, &oldact, NULL);
-  
   return true;
 }
 
@@ -271,7 +304,7 @@ Chunk::from_buffer(const void* buffer, uint32_t position, uint32_t length) {
 // matching.
 bool
 Chunk::compare_buffer(const void* buffer, uint32_t position, uint32_t length) {
-  if (position + length > m_chunkSize)
+  if (position > m_chunkSize || length > m_chunkSize - position)
     throw internal_error("Chunk::compare_buffer(...) position + length > m_chunkSize.");
 
   if (length == 0)

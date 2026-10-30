@@ -33,7 +33,7 @@ dnscc_t *dns_skipdn(dnscc_t *cur, dnscc_t *end) {
     c = *cur++;
     if (!c)
       return cur;
-    if (c & 192)		/* jump */
+    if ((c & 192) == 192)	/* jump */
       return cur + 1 >= end ? NULL : cur + 1;
     cur += c;
   }
@@ -42,6 +42,14 @@ dnscc_t *dns_skipdn(dnscc_t *cur, dnscc_t *end) {
 int
 dns_getdn(dnscc_t *pkt, dnscc_t **cur, dnscc_t *end,
           dnsc_t *dn, unsigned dnsiz) {
+
+  /* extract a DN from on-wire format to dn[dnsiz], checking
+   * for correctness and handling possible compression jumps.
+   * First DN in the packet is right after the fixed-size header.
+   * Compression jumps can only go backwards, to an earlier DN in
+   * the packet.  So the first DN can not contain jumps.
+   */
+
   unsigned c;
   dnscc_t *pp = *cur;		/* current packet pointer */
   dnsc_t *dp = dn;		/* current dn pointer */
@@ -49,20 +57,22 @@ dns_getdn(dnscc_t *pkt, dnscc_t **cur, dnscc_t *end,
        = dn + (dnsiz < DNS_MAXDN ? dnsiz : DNS_MAXDN);
   dnscc_t *jump = NULL;		/* ptr after first jump if any */
   unsigned loop = 100;		/* jump loop counter */
+  dnscc_t *curdnp = pp;		/* start of current DN label sequence:
+				   jump only before it */
 
   for(;;) {		/* loop by labels */
     if (pp >= end)		/* reached end of packet? */
       return -1;
     c = *pp++;			/* length of the label */
     if (!c) {			/* empty label: terminate */
-      if (dn >= de)		/* can't fit terminator */
+      if (dp >= de)		/* can't fit terminator */
         goto noroom;
       *dp++ = 0;
       /* return next pos: either after the first jump or current */
       *cur = jump ? jump : pp;
       return dp - dn;
     }
-    if (c & 192) {		/* jump */
+    if ((c & 192) == 192) {	/* jump */
       if (pp >= end)		/* eop instead of jump pos */
         return -1;
       if (!jump) jump = pp + 1;	/* remember first jump */
@@ -70,8 +80,16 @@ dns_getdn(dnscc_t *pkt, dnscc_t **cur, dnscc_t *end,
       c = ((c & ~192) << 8) | *pp; /* new pos */
       if (c < DNS_HSIZE)	/* don't allow jump into the header */
         return -1;
-      pp = pkt + c;
-      continue;
+      pp = pkt + c;		/* new current position we jumped to */
+      /* Currently we're processing a sequence of labels starting at curdnp.
+       * We should not jump into or past curdnp, and we can't cross this curdnp
+       * in future while processing the remaining part of our DN.
+       * Since we only need single DN from this packet, pretend the packet
+       * actually ends at curdnp: */
+      end = curdnp;		/* should not cross dn we jumped from */
+      /* we jumped to pp.  This is our new current label sequence: */
+      curdnp = pp;		/* next jump to before curdnp only */
+      continue;		/* pp will be checked against end in next loop */
     }
     if (c > DNS_MAXLABEL)	/* too long label? */
       return -1;
@@ -103,6 +121,7 @@ dns_initparse(struct dns_parse *p, dnscc_t *qdn,
   p->dnsp_end = end;
   p->dnsp_rrl = dns_numan(pkt);
   p->dnsp_qdn = qdn;
+  p->dnsp_qdn0 = qdn;
   assert(cur + 4 <= end);
   if ((p->dnsp_qtyp = (enum dns_type)dns_get16(cur+0)) == DNS_T_ANY) p->dnsp_qtyp = (enum dns_type)0;
   if ((p->dnsp_qcls = (enum dns_class)dns_get16(cur+2)) == DNS_C_ANY) p->dnsp_qcls = (enum dns_class)0;
@@ -150,19 +169,52 @@ int dns_nextrr(struct dns_parse *p, struct dns_rr *rr) {
   return 0;
 }
 
+/* Space dns_stdrr_finish() may use for one name.  Never zero, so that a name
+ * dns_dntop() refuses to convert still has room for the terminator.
+ */
+static unsigned dns_stdrr_nsize(dnscc_t *dn) {
+  unsigned size = dns_dntop_size(dn);
+  return size ? size : 1;
+}
+
+/* Write one name into the space dns_stdrr_nsize() reserved for it and return
+ * the position of the next name.
+ */
+static char *dns_stdrr_name(char *cp, dnscc_t *dn) {
+  int r = dns_dntop(dn, cp, dns_stdrr_nsize(dn));
+  if (r <= 0) {
+    *cp = '\0';
+    r = 1;
+  }
+  return cp + r;
+}
+
 int dns_stdrr_size(const struct dns_parse *p) {
-  return
-    dns_dntop_size(p->dnsp_qdn) +
-    (p->dnsp_qdn == dns_payload(p->dnsp_pkt) ? 0 :
-     dns_dntop_size(dns_payload(p->dnsp_pkt)));
+  int size = dns_dntop_size(p->dnsp_qdn); /* always include the RR name */
+  if (p->dnsp_qdn == p->dnsp_dnbuf)
+     /* we also processed chain of CNAMEs (in dns_nextrr()), and the original
+      * query name * was different. Include the DN from the question section.
+      * Technically, dns_dntop et al should not be used to process raw
+      * packets due to validity check requiriments and possible jump pointers
+      * in the raw packet DNs.  But the very first DN can not have jumps and
+      * it is already verified as valid DN when matching reply against active
+      * queries, so this first DN in raw packet actually can be passed to
+      * dns_dntop[_size]().
+      * We should've used q->dnsq_dn here, but we don't have q pointer in
+      * this context.  Please note qdn in reply might have different upper/lower
+      * case from the original query DN.
+      */
+     size += dns_dntop_size(dns_payload(p->dnsp_pkt));
+  return size;
 }
 
 void *dns_stdrr_finish(struct dns_rr_null *ret, char *cp,
                        const struct dns_parse *p) {
   cp += dns_dntop(p->dnsp_qdn, (ret->dnsn_cname = cp), DNS_MAXNAME);
-  if (p->dnsp_qdn == dns_payload(p->dnsp_pkt))
+  if (p->dnsp_qdn != p->dnsp_dnbuf) /* if we didn't have CNAME chains */
     ret->dnsn_qname = ret->dnsn_cname;
-  else
+  else /* else we had CNAMEs */
+    /* process DN in query section, see comments in dns_stdrr_size() */
     dns_dntop(dns_payload(p->dnsp_pkt), (ret->dnsn_qname = cp), DNS_MAXNAME);
   ret->dnsn_ttl = p->dnsp_ttl;
   return ret;

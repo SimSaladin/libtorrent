@@ -77,7 +77,7 @@ RequestList::~RequestList() {
 
 std::vector<const Piece*>
 RequestList::delegate(uint32_t maxPieces) {
-  std::vector<BlockTransfer*> transfers = m_delegator->delegate(m_peerChunks, m_affinity, maxPieces);
+  std::vector<BlockTransfer*> transfers = m_delegator->delegate(m_peer_chunks, m_affinity, maxPieces);
 
   std::vector<const Piece*> pieces;
 
@@ -120,12 +120,7 @@ RequestList::stall_prolonged() {
 
 void
 RequestList::choked() {
-  // Check if we want to update the choke timer; if non-zero and
-  // updated within a short timespan?
-
-  m_last_choke = torrent::this_thread::cached_time();
-
-  if (m_queues.queue_empty(bucket_queued) && m_queues.queue_empty(bucket_unordered))
+  if (m_queues.queue_empty(bucket_queued) && m_queues.queue_empty(bucket_unordered) && m_queues.queue_empty(bucket_stalled))
     return;
 
   m_queues.move_all_to(bucket_queued, bucket_choked);
@@ -137,8 +132,6 @@ RequestList::choked() {
 
 void
 RequestList::unchoked() {
-  m_last_unchoke = torrent::this_thread::cached_time();
-
   // Clear choked queue if the peer doesn't start sending previously
   // requested pieces.
   //
@@ -268,7 +261,7 @@ RequestList::downloading(const Piece& piece) {
   // Create a dummy BlockTransfer object to hold the piece
   // information.
   m_transfer = new BlockTransfer();
-  Block::create_dummy(m_transfer, m_peerChunks->peer_info(), piece);
+  Block::create_dummy(m_transfer, m_peer_chunks->peer_info(), piece);
 
   instrumentation_update(INSTRUMENTATION_TRANSFER_REQUESTS_UNKNOWN, 1);
 
@@ -312,7 +305,7 @@ RequestList::transfer_dissimilar() {
 
   auto dummy = new BlockTransfer();
 
-  Block::create_dummy(dummy, m_peerChunks->peer_info(), m_transfer->piece());
+  Block::create_dummy(dummy, m_peer_chunks->peer_info(), m_transfer->piece());
   dummy->set_position(m_transfer->position());
 
   // TODO.... peer_info still on a block we no longer control?..
@@ -323,26 +316,30 @@ RequestList::transfer_dissimilar() {
 bool
 RequestList::is_interested_in_active() const {
   auto list = m_delegator->transfer_list();
-  return std::any_of(list->begin(), list->end(), [this](auto transfer) { return m_peerChunks->bitfield()->get(transfer->index()); });
+  return std::any_of(list->begin(), list->end(), [this](auto transfer) { return m_peer_chunks->bitfield()->get(transfer->index()); });
 }
 
 uint32_t
-RequestList::calculate_pipe_size(uint32_t rate) {
+RequestList::calculate_pipe_size(uint32_t rate, uint32_t max_size) {
   // Change into KB.
   rate /= 1024;
 
+  uint32_t size;
+
   if (!m_delegator->get_aggressive()) {
     if (rate < 20)
-      return rate + 2;
+      size = rate + 2;
     else
-      return rate / 5 + 18;
+      size = rate / 5 + 18;
 
   } else {
     if (rate < 10)
-      return rate / 5 + 1;
+      size = rate / 5 + 1;
     else
-      return rate / 10 + 2;
+      size = rate / 10 + 2;
   }
+
+  return std::min(size, max_size);
 }
 
 } // namespace torrent

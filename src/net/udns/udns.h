@@ -23,7 +23,7 @@
 
 #ifndef UDNS_VERSION	/* include guard */
 
-#define UDNS_VERSION "0.6"
+#define UDNS_VERSION "0.7"
 
 #ifdef WINDOWS
 # ifdef UDNS_DYNAMIC_LIBRARY
@@ -329,7 +329,7 @@ dns_getdn(dnscc_t *pkt, dnscc_t **curp, dnscc_t *end,
 /* skip the DN at position cur in packet ending before pkte,
  * return pointer to the next byte after the DN or NULL on error */
 UDNS_API dnscc_t *
-dns_skipdn(dnscc_t *end, dnscc_t *cur);
+dns_skipdn(dnscc_t *cur, dnscc_t *end);
 
 struct dns_rr {		/* DNS Resource Record */
   dnsc_t dnsrr_dn[DNS_MAXDN];	/* the DN of the RR */
@@ -350,6 +350,7 @@ struct dns_parse {	/* RR/packet parsing state */
   int dnsp_nrr;			/* RR count so far */
   unsigned dnsp_ttl;		/* TTL value so far */
   dnscc_t *dnsp_qdn;		/* the RR DN we're looking for */
+  dnscc_t *dnsp_qdn0;		/* the question DN, before CNAME chasing */
   enum dns_class dnsp_qcls;	/* RR class we're looking for or 0 */
   enum dns_type  dnsp_qtyp;	/* RR type we're looking for or 0 */
   dnsc_t dnsp_dnbuf[DNS_MAXDN];	/* domain buffer */
@@ -762,6 +763,10 @@ UDNS_API const char *dns_strerror(int errnum);
 struct udns_jranctx {	/* the context */
   unsigned a, b, c, d;
 };
+
+/* return a 32bit value from the system entropy source */
+UDNS_API unsigned
+udns_random32(void);
 
 /* initialize the RNG with a given seed */
 UDNS_API void

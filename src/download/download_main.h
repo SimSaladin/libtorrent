@@ -11,8 +11,8 @@
 #include "torrent/data/file_list.h"
 #include "torrent/download/group_entry.h"
 #include "torrent/peer/peer_list.h"
+#include "torrent/system/scheduler.h"
 #include "torrent/tracker/wrappers.h"
-#include "torrent/utils/scheduler.h"
 
 namespace torrent {
 
@@ -48,7 +48,6 @@ public:
   void                stop();
 
   class choke_group*       choke_group()                           { return m_choke_group; }
-  const class choke_group* c_choke_group() const                   { return m_choke_group; }
   void                     set_choke_group(class choke_group* grp) { m_choke_group = grp; }
 
   tracker::TrackerControllerWrapper tracker_controller()           { return m_tracker_controller; }
@@ -73,8 +72,6 @@ public:
   FileList*           file_list()                                { return &m_fileList; }
   PeerList*           peer_list()                                { return &m_peerList; }
 
-  std::pair<ThrottleList*, ThrottleList*> throttles(const sockaddr* sa);
-
   ThrottleList*       upload_throttle()                          { return m_upload_throttle; }
   void                set_upload_throttle(ThrottleList* t)       { m_upload_throttle = t; }
 
@@ -89,10 +86,6 @@ public:
   bool                want_pex_msg();
 
   void                set_metadata_size(size_t s);
-
-  // Carefull with these.
-  void                setup_delegator();
-  void                setup_tracker();
 
   using slot_count_handshakes_type = std::function<uint32_t(DownloadMain*)>;
   using slot_hash_check_add_type   = std::function<void(ChunkHandle)>;
@@ -114,8 +107,6 @@ public:
   void                receive_tracker_success();
   void                receive_tracker_request();
 
-  void                receive_do_peer_exchange();
-
   void                do_peer_exchange();
 
   void                update_endgame();
@@ -127,9 +118,6 @@ public:
   auto&               delay_disconnect_peers()    { return m_delay_disconnect_peers; }
 
 private:
-  void                setup_start();
-  void                setup_stop();
-
   DownloadInfo*       m_info;
 
   tracker::TrackerControllerWrapper m_tracker_controller;
@@ -165,12 +153,12 @@ private:
   slot_count_handshakes_type m_slot_count_handshakes;
   slot_hash_check_add_type   m_slot_hash_check_add;
 
-  utils::SchedulerEntry      m_delay_download_done;
-  utils::SchedulerEntry      m_delay_partially_done;
-  utils::SchedulerEntry      m_delay_partially_restarted;
+  system::SchedulerEntry     m_delay_download_done;
+  system::SchedulerEntry     m_delay_partially_done;
+  system::SchedulerEntry     m_delay_partially_restarted;
 
-  utils::SchedulerEntry      m_delay_disconnect_peers;
-  utils::SchedulerEntry      m_task_tracker_request;
+  system::SchedulerEntry     m_delay_disconnect_peers;
+  system::SchedulerEntry     m_task_tracker_request;
 };
 
 } // namespace torrent

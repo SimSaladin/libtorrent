@@ -2,6 +2,7 @@
 #define LIBTORRENT_NET_FD_H
 
 #include <string>
+#include <sys/types.h>
 #include <torrent/common.h>
 #include <torrent/net/types.h>
 
@@ -15,41 +16,52 @@ enum fd_flags : int {
   fd_flag_v4            = 0x80, // renamed
   fd_flag_v4only        = 0x80,
   fd_flag_v6only        = 0x100,
-  fd_flag_all           = 0x1ff,
+  fd_flag_v6            = 0x200,
+  fd_flag_all           = 0x3ff,
 };
 
-constexpr bool fd_valid_flags(fd_flags flags);
+constexpr bool  fd_valid_flags(fd_flags flags);
 
-int  fd_open(fd_flags flags) LIBTORRENT_EXPORT;
-int  fd_open_family(fd_flags flags, int family) LIBTORRENT_EXPORT;
-int  fd_open_local(fd_flags flags) LIBTORRENT_EXPORT;
-void fd_open_pipe(int& fd1, int& fd2) LIBTORRENT_EXPORT;
-void fd_open_socket_pair(int& fd1, int& fd2) LIBTORRENT_EXPORT;
-void fd_close(int fd) LIBTORRENT_EXPORT;
+int             fd_open(fd_flags flags) LIBTORRENT_EXPORT;
+int             fd_open_family(fd_flags flags, int family) LIBTORRENT_EXPORT;
+int             fd_open_local(fd_flags flags) LIBTORRENT_EXPORT;
+int             fd_open_file(const std::string& path, int flags, mode_t mode) LIBTORRENT_EXPORT;
+void            fd_open_pipe(int& fd1, int& fd2) LIBTORRENT_EXPORT;
+void            fd_open_socket_pair(int& fd1, int& fd2) LIBTORRENT_EXPORT;
+int             fd_open_epoll(int size) LIBTORRENT_EXPORT;
+int             fd_open_kqueue() LIBTORRENT_EXPORT;
+int             fd_open_inotify() LIBTORRENT_EXPORT;
 
-int          fd_accept(int fd) LIBTORRENT_EXPORT;
-fd_sap_tuple fd_sap_accept(int fd) LIBTORRENT_EXPORT;
+void            fd_close(int fd) LIBTORRENT_EXPORT;
+void            fd_close_and_clear(int& fd) LIBTORRENT_EXPORT;
+void            fd_close_and_clear_if_open(int& fd) LIBTORRENT_EXPORT;
 
-bool fd_bind(int fd, const sockaddr* sa) LIBTORRENT_EXPORT;
-bool fd_bind_with_length(int fd, const sockaddr* sa, socklen_t length) LIBTORRENT_EXPORT;
-bool fd_connect(int fd, const sockaddr* sa) LIBTORRENT_EXPORT;
-bool fd_connect_with_family(int fd, const sockaddr* sa, int family) LIBTORRENT_EXPORT;
-bool fd_listen(int fd, int backlog) LIBTORRENT_EXPORT;
+int             fd_accept(int fd) LIBTORRENT_EXPORT;
+fd_sap_tuple    fd_sap_accept(int fd) LIBTORRENT_EXPORT;
 
-c_sa_unique_ptr fd_get_peer_name(int fd) LIBTORRENT_EXPORT;
+bool            fd_bind(int fd, const sockaddr* sa) LIBTORRENT_EXPORT;
+bool            fd_bind_with_length(int fd, const sockaddr* sa, socklen_t length) LIBTORRENT_EXPORT;
+bool            fd_bind_to_device(int fd, const char* device, int family) LIBTORRENT_EXPORT;
+bool            fd_connect(int fd, const sockaddr* sa) LIBTORRENT_EXPORT;
+bool            fd_connect_with_family(int fd, const sockaddr* sa, int family) LIBTORRENT_EXPORT;
+bool            fd_listen(int fd, int backlog) LIBTORRENT_EXPORT;
+
+bool            fd_get_nonblock(int fd, bool* value) LIBTORRENT_EXPORT;
 bool            fd_get_socket_error(int fd, int* value) LIBTORRENT_EXPORT;
-c_sa_unique_ptr fd_get_socket_name(int fd) LIBTORRENT_EXPORT;
 bool            fd_get_type(int fd, int* value) LIBTORRENT_EXPORT;
 
-bool fd_set_dont_route(int fd, bool state) LIBTORRENT_EXPORT;
-bool fd_set_nonblock(int fd) LIBTORRENT_EXPORT;
-bool fd_set_reuse_address(int fd, bool state) LIBTORRENT_EXPORT;
-bool fd_set_priority(int fd, int family, int priority) LIBTORRENT_EXPORT;
-bool fd_set_tcp_nodelay(int fd) LIBTORRENT_EXPORT;
-bool fd_set_v6only(int fd, bool state) LIBTORRENT_EXPORT;
+c_sa_unique_ptr fd_get_peer_name(int fd) LIBTORRENT_EXPORT;
+c_sa_unique_ptr fd_get_socket_name(int fd) LIBTORRENT_EXPORT;
 
-bool fd_set_send_buffer_size(int fd, uint32_t size) LIBTORRENT_EXPORT;
-bool fd_set_receive_buffer_size(int fd, uint32_t size) LIBTORRENT_EXPORT;
+bool            fd_set_dont_route(int fd, bool state) LIBTORRENT_EXPORT;
+bool            fd_set_nonblock(int fd) LIBTORRENT_EXPORT;
+bool            fd_set_reuse_address(int fd, bool state) LIBTORRENT_EXPORT;
+bool            fd_set_priority(int fd, int family, int priority) LIBTORRENT_EXPORT;
+bool            fd_set_tcp_nodelay(int fd) LIBTORRENT_EXPORT;
+bool            fd_set_v6only(int fd, bool state) LIBTORRENT_EXPORT;
+
+bool            fd_set_send_buffer_size(int fd, uint32_t size) LIBTORRENT_EXPORT;
+bool            fd_set_receive_buffer_size(int fd, uint32_t size) LIBTORRENT_EXPORT;
 
 // Defined with gnu::weak so that we can override them in tests.
 [[gnu::weak]] int fd__accept(int socket, sockaddr *address, socklen_t *address_len) LIBTORRENT_EXPORT;
@@ -77,6 +89,7 @@ fd_valid_flags(fd_flags flags) {
     ((flags & fd_flag_stream) || (flags & fd_flag_datagram)) &&
     !((flags & fd_flag_stream) && (flags & fd_flag_datagram)) &&
     !((flags & fd_flag_v4only) && (flags & fd_flag_v6only)) &&
+    !((flags & fd_flag_v4) && (flags & fd_flag_v6)) &&
     !(flags & ~(fd_flag_all));
 }
 

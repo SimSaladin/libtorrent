@@ -44,8 +44,16 @@ public:
   static constexpr size_t metadata_piece_shift = 14;
   static constexpr size_t metadata_piece_size  = 1 << metadata_piece_shift;
 
+  // Maximum number of upload requests accepted from one peer.
+  static constexpr size_t max_request_queue_size = 2048;
+
+  // Default request queue size for a peer that does not send "reqq" in the handshake.
+  static constexpr uint32_t default_peer_request_queue_size = 500;
+
+  static size_t       metadata_piece_length(size_t piece, size_t metadata_size);
+
   ProtocolExtension();
-  ~ProtocolExtension() { delete [] m_read; }
+  ~ProtocolExtension();
   ProtocolExtension(const ProtocolExtension&) = default;
   ProtocolExtension& operator=(const ProtocolExtension&) = default;
 
@@ -73,12 +81,12 @@ public:
   void                unset_local_enabled(int t);
   void                set_remote_supported(int t)      { m_flags |= flag_remote_supported_base << t; }
 
-  // General information about peer from extension handshake.
-  uint32_t            max_queue_length() const         { return m_maxQueueLength; }
-
   // Handle reading extension data from peer.
   void                read_start(int type, uint32_t length, bool skip);
-  bool                read_done();
+
+  // Pass keep_unprocessed when the caller is able to parse the message again
+  // later; it is then kept instead of being discarded.
+  bool                read_done(bool keep_unprocessed = false);
 
   char*               read_position()                  { return m_readPos; }
   bool                read_move(uint32_t v)            { m_readPos += v; return (m_readLeft -= v) == 0; }
@@ -88,6 +96,9 @@ public:
   bool                is_invalid() const               { return m_readType == FIRST_INVALID; }
 
   bool                is_default() const               { return m_flags & flag_default; }
+
+  // The size of a peer's request queue: "reqq" from the handshake, or the default value if none was sent.
+  uint32_t            peer_request_queue() const       { return m_peer_request_queue; }
 
   // Initial PEX message after peer enables PEX needs to send full list
   // of peers instead of the delta list, so keep track of that.
@@ -121,11 +132,10 @@ private:
   // HANDSHAKE.
   uint8_t             m_idMap[extension_count];
 
-  uint32_t            m_maxQueueLength;
-
   // Set HANDSHAKE as enabled and supported. Those bits should not be
   // touched.
   int                 m_flags{flag_local_enabled_base | flag_remote_supported_base | flag_initial_handshake};
+  uint32_t            m_peer_request_queue{default_peer_request_queue_size};
   PeerInfo*           m_peerInfo{};
   DownloadMain*       m_download{};
   PeerConnectionBase* m_connection{};
@@ -152,6 +162,7 @@ enum ext_handshake_keys {
 
 enum ext_pex_keys {
   key_pex_added,
+  key_pex_added6,
   key_pex_LAST
 };
 

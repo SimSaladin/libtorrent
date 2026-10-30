@@ -17,16 +17,15 @@ public:
   Resolver() = default;
   ~Resolver() = default;
 
-  // May be called from any thread.
-  void                resolve_both(void* requester, const std::string& hostname, int family, both_callback&& callback);
-  void                resolve_preferred(void* requester, const std::string& hostname, int family, int preferred, single_callback&& callback);
-  void                resolve_specific(void* requester, const std::string& hostname, int family, single_callback&& callback);
+  void                resolve_both(system::callback_id& id, const std::string& hostname, int family, both_callback&& callback);
+  void                resolve_preferred(system::callback_id& id, const std::string& hostname, int family, int preferred, single_callback&& callback);
+  void                resolve_specific(system::callback_id& id, const std::string& hostname, int family, single_callback&& callback);
 
   // Must be called from the owning thread.
-  void                cancel(void* requester);
+  void                cancel(system::callback_id& callback_id);
 
 protected:
-  friend class utils::Thread;
+  friend class system::Thread;
 
   void                init();
 
@@ -34,7 +33,7 @@ private:
   Resolver(const Resolver&) = delete;
   Resolver& operator=(const Resolver&) = delete;
 
-  utils::Thread* m_thread{nullptr};
+  system::Thread* m_thread{nullptr};
 };
 
 } // namespace torrent::net

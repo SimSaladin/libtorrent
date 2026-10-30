@@ -4,21 +4,22 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 
 #include "manager.h"
 #include "download/download_main.h"
 #include "net/throttle_list.h"
+#include "protocol/encryption_policy.h"
 #include "protocol/extensions.h"
 #include "protocol/handshake_manager.h"
 #include "torrent/download_info.h"
-#include "torrent/error.h"
 #include "torrent/exceptions.h"
 #include "torrent/throttle.h"
 #include "torrent/net/fd.h"
-#include "torrent/net/network_config.h"
-#include "torrent/net/poll.h"
+#include "torrent/runtime/network_config.h"
 #include "torrent/runtime/network_manager.h"
 #include "torrent/runtime/socket_manager.h"
+#include "torrent/system/poll.h"
 #include "torrent/utils/log.h"
 #include "torrent/utils/string_manip.h"
 #include "utils/diffie_hellman.h"
@@ -48,13 +49,40 @@ private:
   int     m_error;
 };
 
+std::array<const char*, torrent::Handshake::e_last> error_strings{
+  "not BitTorrent protocol",            // eh_not_bittorrent
+  "not accepting connections",          // eh_not_accepting_connections
+  "unknown download",                   // eh_unknown_download
+  "download inactive",                  // eh_inactive_download
+  "seeder rejected",                    // eh_unwanted_connection
+  "is self",                            // eh_is_self
+  "invalid value received",             // eh_invalid_value
+  "unencrypted connection rejected",    // eh_unencrypted_rejected
+  "invalid encryption method",          // eh_invalid_encryption
+  "encryption sync failed",             // eh_encryption_sync_failed
+  "network unreachable",                // eh_network_unreachable
+  "network timeout",                    // eh_network_timeout
+  "too many failed chunks",             // eh_toomanyfailed
+  "no peer info",                       // eh_no_peer_info
+  "network socket error",               // eh_network_socket_error
+  "network read error",                 // eh_network_read_error
+  "network write error",                // eh_network_write_error
+};
+
 } // namespace
 
 namespace torrent {
 
+const char*
+handshake_strerror(int err) {
+  if (err < 0 || err >= Handshake::e_last)
+    throw internal_error("handshake_strerror() called with invalid error code.");
+
+  return error_strings[err];
+}
+
 Handshake::Handshake()
-  : m_encryption(HandshakeEncryption::RETRY_NONE),
-    m_extensions(HandshakeManager::default_extensions()) {
+  : m_extensions(HandshakeManager::default_extensions()) {
 
   m_readBuffer.reset();
   m_writeBuffer.reset();
@@ -77,14 +105,15 @@ Handshake::set_manager(HandshakeManager* handshake_manager) {
 }
 
 void
-Handshake::initialize_incoming(HandshakeManager* handshake_manager, int fd, const sockaddr* sa, int encryption_options) {
+Handshake::initialize_incoming(HandshakeManager* handshake_manager, int fd, const sockaddr* sa, EncryptionPolicy policy) {
   set_manager(handshake_manager);
 
-  m_incoming   = true;
-  m_address    = sa_copy(sa);
-  m_encryption = encryption_options;
+  m_incoming = true;
+  m_address  = sa_copy(sa);
 
-  if (m_encryption.options() & (net::NetworkConfig::encryption_allow_incoming | net::NetworkConfig::encryption_require))
+  m_encryption.set_policy(policy);
+
+  if (m_encryption.policy().allow_encrypted_handshake())
     m_state = READ_ENC_KEY;
   else
     m_state = READ_INFO;
@@ -93,14 +122,13 @@ Handshake::initialize_incoming(HandshakeManager* handshake_manager, int fd, cons
 
   this_thread::poll()->open(this);
   this_thread::poll()->insert_read(this);
-  this_thread::poll()->insert_error(this);
 
   // Use lower timeout here.
   this_thread::scheduler()->wait_for_ceil_seconds(&m_task_timeout, 60s);
 }
 
 void
-Handshake::initialize_outgoing(HandshakeManager* handshake_manager, int fd, const sockaddr* sa, int encryption_options, DownloadMain* d, PeerInfo* peerInfo) {
+Handshake::initialize_outgoing(HandshakeManager* handshake_manager, int fd, const sockaddr* sa, EncryptionPolicy policy, DownloadMain* d, PeerInfo* peerInfo) {
   set_manager(handshake_manager);
 
   m_download = d;
@@ -108,11 +136,12 @@ Handshake::initialize_outgoing(HandshakeManager* handshake_manager, int fd, cons
   m_peerInfo = peerInfo;
   m_peerInfo->set_flags(PeerInfo::flag_handshake);
 
-  m_incoming   = false;
-  m_address    = sa_copy(sa);
-  m_encryption = encryption_options;
+  m_incoming          = false;
+  m_address           = sa_copy(sa);
+  m_upload_throttle   = m_download->upload_throttle();
+  m_download_throttle = m_download->download_throttle();
 
-  std::make_pair(m_upload_throttle, m_download_throttle) = m_download->throttles(m_address.get());
+  m_encryption.set_policy(policy);
 
   m_state = CONNECTING;
 
@@ -120,7 +149,6 @@ Handshake::initialize_outgoing(HandshakeManager* handshake_manager, int fd, cons
 
   this_thread::poll()->open(this);
   this_thread::poll()->insert_write(this);
-  this_thread::poll()->insert_error(this);
 
   this_thread::scheduler()->wait_for_ceil_seconds(&m_task_timeout, 60s);
 }
@@ -137,7 +165,7 @@ Handshake::release_connection() {
   m_peerInfo = nullptr;
   m_state    = INACTIVE;
 
-  set_file_descriptor(-1);
+  reset_file_descriptor();
 }
 
 void
@@ -152,8 +180,7 @@ Handshake::destroy_connection(bool use_socket_manager) {
   auto fn = [this]() {
       this_thread::poll()->remove_and_close(this);
 
-      fd_close(m_fileDesc);
-      set_file_descriptor(-1);
+      fd_close_and_clear(file_descriptor_ref());
     };
 
   try {
@@ -166,15 +193,9 @@ Handshake::destroy_connection(bool use_socket_manager) {
     if (is_polling())
       this_thread::poll()->remove_and_close(this);
 
-    if (is_open()) {
-      fd_close(m_fileDesc);
-      set_file_descriptor(-1);
-    }
-
+    fd_close_and_clear_if_open(file_descriptor_ref());
     throw;
   }
-
-  manager->connection_manager()->dec_socket_count();
 
   if (m_peerInfo == NULL)
     return; // TODO: This should throw.
@@ -190,20 +211,6 @@ Handshake::destroy_connection(bool use_socket_manager) {
   }
 }
 
-int
-Handshake::retry_options() {
-  uint32_t options = m_encryption.options() & ~net::NetworkConfig::encryption_enable_retry;
-
-  if (m_encryption.retry() == HandshakeEncryption::RETRY_PLAIN)
-    options &= ~net::NetworkConfig::encryption_try_outgoing;
-  else if (m_encryption.retry() == HandshakeEncryption::RETRY_ENCRYPTED)
-    options |= net::NetworkConfig::encryption_try_outgoing;
-  else
-    throw internal_error("Invalid retry type.");
-
-  return options;
-}
-
 inline uint32_t
 Handshake::read_unthrottled(void* buf, uint32_t length) {
   return m_download_throttle->node_used_unthrottled(read_stream_throws(buf, length));
@@ -214,27 +221,35 @@ Handshake::write_unthrottled(const void* buf, uint32_t length) {
   return m_upload_throttle->node_used_unthrottled(write_stream_throws(buf, length));
 }
 
-// Handshake::read_proxy_connect()
-// Entry: 0, 0
-// * 0, [0, 508>
 bool
-Handshake::read_proxy_connect() {
-  // Being greedy for now.
-  m_readBuffer.move_end(read_unthrottled(m_readBuffer.end(), 512));
+Handshake::read_proxy() {
+  if (m_readBuffer.reserved_left() == 0)
+    throw handshake_error(handshake_dropped, e_handshake_invalid_value);
 
-  const char* pattern = "\r\n\r\n";
-  const unsigned int patternLength = 4;
+  m_readBuffer.move_end(read_unthrottled(m_readBuffer.end(), m_readBuffer.reserved_left()));
 
-  if (m_readBuffer.remaining() < patternLength)
+  m_readBuffer.consume(m_proxy->read(m_readBuffer.position(), m_readBuffer.remaining()));
+
+  switch (m_proxy->next_action()) {
+  case net::proxy::state_writing:
+    this_thread::poll()->remove_read(this);
+    this_thread::poll()->insert_write(this);
+
+    m_state = PROXY_WRITE;
     return false;
 
-  auto itr = std::search(m_readBuffer.begin(), m_readBuffer.end(),
-                                     reinterpret_cast<const uint8_t*>(pattern), reinterpret_cast<const uint8_t*>(pattern) + patternLength);
+  case net::proxy::state_reading:
+    return false;
 
-  m_readBuffer.set_position_itr(itr != m_readBuffer.end() ? (itr + patternLength) : (itr - patternLength));
-  m_readBuffer.move_unused();
+  case net::proxy::state_done:
+    m_readBuffer.move_unused();
 
-  return itr != m_readBuffer.end();
+    m_state = PROXY_DONE;
+    return true;
+
+  default:
+    throw handshake_error(handshake_dropped, e_handshake_invalid_value);
+  }
 }
 
 // Handshake::read_encryption_key()
@@ -251,9 +266,8 @@ Handshake::read_encryption_key() {
       return false;
 
     if (m_readBuffer.peek_8() == 19 && std::memcmp(m_readBuffer.position() + 1, m_protocol, 19) == 0) {
-      // got unencrypted BT handshake
-      if (m_encryption.options() & net::NetworkConfig::encryption_require)
-        throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_unencrypted_rejected);
+      if (m_encryption.policy().require_encrypted_handshake())
+        throw handshake_error(handshake_dropped, e_handshake_unencrypted_rejected);
 
       m_state = READ_INFO;
       return true;
@@ -270,15 +284,16 @@ Handshake::read_encryption_key() {
   if (m_readBuffer.size_end() < 96)
     return false;
 
-  // If the handshake fails after this, it wasn't because the peer
-  // doesn't like encrypted connections, so don't retry unencrypted.
-  m_encryption.set_retry(HandshakeEncryption::RETRY_NONE);
+  // If the handshake fails after this, it wasn't because the peer doesn't like encrypted
+  // connections, so don't retry unencrypted.
+  m_encryption.policy().set_retry_disabled();
 
   if (m_incoming)
     prepare_key_plus_pad();
 
   if(!m_encryption.key()->compute_secret(m_readBuffer.position(), 96))
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_encryption);
+    throw handshake_error(handshake_failed, e_handshake_invalid_encryption);
+
   m_readBuffer.consume(96);
 
   // Determine the synchronisation string.
@@ -310,7 +325,7 @@ Handshake::read_encryption_sync() {
     int toRead = enc_pad_size + m_encryption.sync_length() - m_readBuffer.remaining();
 
     if (toRead <= 0)
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_encryption_sync_failed);
+      throw handshake_error(handshake_failed, e_handshake_encryption_sync_failed);
 
     m_readBuffer.move_end(read_unthrottled(m_readBuffer.end(), toRead));
 
@@ -350,9 +365,10 @@ Handshake::read_encryption_skey() {
 
   // We don't allow encrypted connections for meta-data downloads.
   if (m_download->info()->is_meta_download())
-    throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_invalid_encryption);
+    throw handshake_error(handshake_dropped, e_handshake_invalid_encryption);
 
-  std::make_pair(m_upload_throttle, m_download_throttle) = m_download->throttles(m_address.get());
+  m_upload_throttle   = m_download->upload_throttle();
+  m_download_throttle = m_download->download_throttle();
 
   m_encryption.initialize_encrypt(m_download->info()->hash().c_str(), m_incoming);
   m_encryption.initialize_decrypt(m_download->info()->hash().c_str(), m_incoming);
@@ -384,7 +400,7 @@ Handshake::read_encryption_negotiation() {
   }
 
   if (!HandshakeEncryption::compare_vc(m_readBuffer.position()))
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   m_readBuffer.consume(HandshakeEncryption::vc_length);
 
@@ -392,25 +408,38 @@ Handshake::read_encryption_negotiation() {
   m_readPos = m_readBuffer.read_16();       // length of padC/padD
 
   if (m_readPos > enc_pad_size)
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   // choose one of the offered encryptions, or check the chosen one is valid
   if (m_incoming) {
-    if ((m_encryption.options() & net::NetworkConfig::encryption_prefer_plaintext) && m_encryption.has_crypto_plain()) {
-      m_encryption.set_crypto(HandshakeEncryption::crypto_plain);
+    // Incoming connection, select mode:
 
-    } else if ((m_encryption.options() & net::NetworkConfig::encryption_require_RC4) && !m_encryption.has_crypto_rc4()) {
-      throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_unencrypted_rejected);
+    // TODO: Check if we (can use / are using) 'e' key in protocol extension.
 
-    } else if (m_encryption.has_crypto_rc4()) {
-      m_encryption.set_crypto(HandshakeEncryption::crypto_rc4);
+    auto selected_mode = [this]() {
+        if (m_encryption.has_stream_both()) {
+          if (m_encryption.policy().prefer_encrypted_stream())
+            return HandshakeEncryption::crypto_encrypted;
+          else
+            return HandshakeEncryption::crypto_plaintext;
 
-    } else if (m_encryption.has_crypto_plain()) {
-      m_encryption.set_crypto(HandshakeEncryption::crypto_plain);
+        } else if (m_encryption.has_stream_plaintext()) {
+          if (!m_encryption.policy().allow_plaintext_stream())
+            throw handshake_error(handshake_failed, e_handshake_unencrypted_rejected);
 
-    } else {
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_encryption);
-    }
+          return HandshakeEncryption::crypto_plaintext;
+
+        } else if (m_encryption.has_stream_encrypted()) {
+          if (!m_encryption.policy().allow_encrypted_stream())
+            throw handshake_error(handshake_failed, e_handshake_invalid_encryption);
+
+          return HandshakeEncryption::crypto_encrypted;
+        }
+
+        throw handshake_error(handshake_failed, e_handshake_invalid_encryption);
+      }();
+
+    m_encryption.set_crypto(selected_mode);
 
     // at this point we can also write the rest of our negotiation reply
     m_writeBuffer.write_32(m_encryption.crypto());
@@ -418,19 +447,32 @@ Handshake::read_encryption_negotiation() {
     m_encryption.info()->encrypt(m_writeBuffer.end() - 4 - 2, 4 + 2);
 
   } else {
-    if (m_encryption.crypto() != HandshakeEncryption::crypto_rc4 && m_encryption.crypto() != HandshakeEncryption::crypto_plain)
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_encryption);
+    // Outgoing connection, verify offered modes:
+    //
+    // We don't disable retry on failure as the peer client might be badly implemented, and doesn't
+    // offer plaintext stream.
+    //
+    // Review other clients to see if they all behave correctly, in that case set retry to disabled.
 
-    if ((m_encryption.options() & net::NetworkConfig::encryption_require_RC4) && (m_encryption.crypto() != HandshakeEncryption::crypto_rc4))
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_encryption);
-  }
+    if (m_encryption.is_stream_plaintext()) {
+      LT_LOG_EXTRA_DEBUG_SA(m_address, "read_encryption_negotiation: peer offered plaintext stream", 0);
 
-  if (!m_incoming) {
-    // decrypt appropriate part of buffer: only pad or all
-    if (m_encryption.crypto() == HandshakeEncryption::crypto_plain)
+      if (m_encryption.policy().require_encrypted_stream())
+        throw handshake_error(handshake_failed, e_handshake_unencrypted_rejected);
+
       m_encryption.info()->decrypt(m_readBuffer.position(), std::min<uint32_t>(m_readPos, m_readBuffer.remaining()));
-    else
+
+    } else if (m_encryption.is_stream_encrypted()) {
+      LT_LOG_EXTRA_DEBUG_SA(m_address, "read_encryption_negotiation: peer offered encrypted stream", 0);
+
+      if (m_encryption.policy().require_plaintext_stream())
+        throw handshake_error(handshake_failed, e_handshake_invalid_encryption);
+
       m_encryption.info()->decrypt(m_readBuffer.position(), m_readBuffer.remaining());
+
+    } else {
+      throw handshake_error(handshake_failed, e_handshake_invalid_encryption);
+    }
   }
 
   // next, skip padC/padD
@@ -441,7 +483,7 @@ Handshake::read_encryption_negotiation() {
 bool
 Handshake::read_negotiation_reply() {
   if (!m_incoming) {
-    if (m_encryption.crypto() != HandshakeEncryption::crypto_rc4)
+    if (m_encryption.is_stream_plaintext())
       m_encryption.info()->set_obfuscated();
 
     m_state = READ_INFO;
@@ -459,7 +501,7 @@ Handshake::read_negotiation_reply() {
   m_encryption.set_length_ia(m_readBuffer.read_16());
 
   if (m_encryption.length_ia() > handshake_size)
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   m_state = READ_ENC_IA;
 
@@ -477,27 +519,21 @@ Handshake::read_info() {
   if ((m_readBuffer.remaining() >= 1 && m_readBuffer.peek_8() != 19) ||
       (m_readBuffer.remaining() >= 20 &&
        (std::memcmp(m_readBuffer.position() + 1, m_protocol, 19) != 0)))
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_not_bittorrent);
+    throw handshake_error(handshake_failed, e_handshake_not_bittorrent);
 
   if (m_readBuffer.remaining() < part1_size)
     return false;
 
-  // If the handshake fails after this, it isn't being rejected because
-  // it is unencrypted, so don't retry.
-  m_encryption.set_retry(HandshakeEncryption::RETRY_NONE);
-
-  m_readBuffer.consume(20);
-
   // Should do some option field stuff here, for now just copy.
+  m_readBuffer.consume(20);
   m_readBuffer.read_range(m_options, m_options + 8);
 
   // Check the info hash.
   if (m_incoming) {
     if (m_download != NULL) {
-      // Have the download from the encrypted handshake, make sure it
-      // matches the BT handshake.
+      // Have the download from the encrypted handshake, make sure it matches the BT handshake.
       if (m_download->info()->hash().not_equal_to(reinterpret_cast<char*>(m_readBuffer.position())))
-        throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+        throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
     } else {
       m_download = m_manager->download_info(reinterpret_cast<char*>(m_readBuffer.position()));
@@ -505,13 +541,18 @@ Handshake::read_info() {
 
     validate_download();
 
-    std::make_pair(m_upload_throttle, m_download_throttle) = m_download->throttles(m_address.get());
+    m_upload_throttle   = m_download->upload_throttle();
+    m_download_throttle = m_download->download_throttle();
 
     prepare_handshake();
 
   } else {
+    // If it fails after this, a plaintext handshake isn't being rejected because it is unencrypted,
+    // so don't retry.
+    m_encryption.policy().set_retry_disabled();
+
     if (m_download->info()->hash().not_equal_to(reinterpret_cast<char*>(m_readBuffer.position())))
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+      throw handshake_error(handshake_failed, e_handshake_invalid_value);
   }
 
   m_readBuffer.consume(20);
@@ -581,24 +622,23 @@ Handshake::read_bitfield() {
 bool
 Handshake::read_extension() {
   if (m_readBuffer.peek_32() > m_readBuffer.reserved())
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   int32_t need = m_readBuffer.peek_32() + 4 - m_readBuffer.remaining();
 
-  // We currently can't handle an extension handshake that doesn't
-  // completely fit in the buffer.  However these messages are usually
-  // ~100 bytes large and the buffer holds over 1000 bytes so it
-  // should be ok. Else maybe figure out how to disable extensions for
-  // when peer connects next time.
+  // We currently can't handle an extension handshake that doesn't completely fit in the buffer.
+  // However these messages are usually ~100 bytes large and the buffer holds over 1000 bytes so it
+  // should be ok. Else maybe figure out how to disable extensions for when peer connects next time.
   //
-  // In addition, make sure there's at least 5 bytes available after
-  // the PEX message has been read, so that we can fit the preamble of
-  // the BITFIELD message.
+  //
+  // In addition, make sure there's at least 5 bytes available after the PEX message has been read,
+  // so that we can fit the preamble of the BITFIELD message.
+
   if (need + 5 > m_readBuffer.reserved_left()) {
     m_readBuffer.move_unused();
 
     if (need + 5 > m_readBuffer.reserved_left())
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+      throw handshake_error(handshake_failed, e_handshake_invalid_value);
   }
 
   LT_LOG_EXTRA_DEBUG_SA(m_address, "read_extension", 0)
@@ -625,7 +665,7 @@ Handshake::read_extension() {
 bool
 Handshake::read_port() {
   if (m_readBuffer.peek_32() > m_readBuffer.reserved())
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   int32_t need = m_readBuffer.peek_32() + 4 - m_readBuffer.remaining();
 
@@ -633,7 +673,7 @@ Handshake::read_port() {
     m_readBuffer.move_unused();
 
     if (need + 5 > m_readBuffer.reserved_left())
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+      throw handshake_error(handshake_failed, e_handshake_invalid_value);
   }
 
   LT_LOG_EXTRA_DEBUG_SA(m_address, "read_port", 0)
@@ -645,7 +685,7 @@ Handshake::read_port() {
   m_readBuffer.read_8();
 
   if (length == 2)
-    runtime::dht_add_peer_node(m_address.get(), m_readBuffer.peek_16());
+    runtime::network_manager()->dht_add_peer_node(m_address.get(), m_readBuffer.peek_16());
 
   m_readBuffer.consume(length);
   return true;
@@ -657,7 +697,7 @@ Handshake::read_done() {
     throw internal_error("Handshake::read_done() m_readDone != false.");
 
 //   if (m_peerInfo->supports_extensions() && m_extensions->is_initial_handshake())
-//     throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_order);
+//     throw handshake_error(handshake_failed, e_handshake_invalid_order);
 
   m_readDone = true;
   this_thread::poll()->remove_read(this);
@@ -687,13 +727,17 @@ Handshake::event_read() {
 
 restart:
     switch (m_state) {
-    case PROXY_CONNECT:
-      if (!read_proxy_connect())
+    case PROXY_READ:
+      // if (!read_proxy_connect())
+      //   break;
+
+      // m_state = PROXY_DONE;
+
+      // this_thread::poll()->insert_write(this);
+
+      if (!read_proxy())
         break;
 
-      m_state = PROXY_DONE;
-
-      this_thread::poll()->insert_write(this);
       return event_write();
 
     case READ_ENC_KEY:
@@ -754,9 +798,9 @@ restart:
         break;
 
       if (m_readBuffer.remaining() > m_encryption.length_ia())
-        throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+        throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
-      if (m_encryption.crypto() != HandshakeEncryption::crypto_rc4)
+      if (m_encryption.is_stream_plaintext())
         m_encryption.info()->set_obfuscated();
 
       m_state = READ_INFO;
@@ -821,7 +865,7 @@ restart:
         const Bitfield* bitfield = m_download->file_list()->bitfield();
 
         if (!m_bitfield.empty() || m_readBuffer.read_32() != bitfield->size_bytes() + 1)
-          throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+          throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
         m_readBuffer.read_8();
 
@@ -887,7 +931,7 @@ restart:
   m_manager->receive_failed(this, e.type(), e.error());
 
 } catch (const network_error&) {
-  m_manager->receive_failed(this, ConnectionManager::handshake_failed, e_handshake_network_read_error);
+  m_manager->receive_failed(this, handshake_failed, e_handshake_network_read_error);
 }
 }
 
@@ -911,12 +955,14 @@ Handshake::fill_read_buffer(int size) {
 
 inline void
 Handshake::validate_download() {
-  if (m_download == NULL)
-    throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_unknown_download);
+  if (m_download == nullptr)
+    throw handshake_error(handshake_dropped, e_handshake_unknown_download);
+
   if (!m_download->info()->is_active())
-    throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_inactive_download);
+    throw handshake_error(handshake_dropped, e_handshake_inactive_download);
+
   if (!m_download->info()->is_accepting_new_peers())
-    throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_not_accepting_connections);
+    throw handshake_error(handshake_dropped, e_handshake_not_accepting_connections);
 }
 
 void
@@ -928,19 +974,20 @@ Handshake::event_write() {
     switch (m_state) {
     case CONNECTING:
       if (!fd_get_socket_error(file_descriptor(), &socket_error))
-        throw internal_error("Handshake::event_write() fd_get_socket_error failed : " + std::string(strerror(errno)));
+        throw internal_error("Handshake::event_write() fd_get_socket_error failed : " + std::string(std::strerror(errno)));
 
       if (socket_error != 0)
-        throw handshake_error(ConnectionManager::handshake_failed, e_handshake_network_unreachable);
+        throw handshake_error(handshake_failed, e_handshake_network_unreachable);
 
-      this_thread::poll()->insert_read(this);
-
-      if (m_encryption.options() & net::NetworkConfig::encryption_use_proxy) {
-        prepare_proxy_connect();
-
-        m_state = PROXY_CONNECT;
+      [[fallthrough]];
+    case PROXY_WRITE:
+      if (m_proxy) {
+        write_proxy();
         break;
       }
+
+      // TODO: Verify placement.
+      this_thread::poll()->insert_read(this);
 
       [[fallthrough]];
     case PROXY_DONE:
@@ -948,25 +995,26 @@ Handshake::event_write() {
       // the other side before our proxy connect command was finished
       // written. This probably means the other side isn't a proxy.
       if (m_writeBuffer.remaining())
-        throw handshake_error(ConnectionManager::handshake_failed, e_handshake_not_bittorrent);
+        throw handshake_error(handshake_failed, e_handshake_not_bittorrent);
 
       m_writeBuffer.reset();
 
-      if (m_encryption.options() & (net::NetworkConfig::encryption_try_outgoing | net::NetworkConfig::encryption_require)) {
+      if (m_encryption.policy().prefer_encrypted_handshake()) {
         prepare_key_plus_pad();
 
-        // if connection fails, peer probably closed it because it was encrypted, so retry encrypted if enabled
-        if (!(m_encryption.options() & net::NetworkConfig::encryption_require))
-          m_encryption.set_retry(HandshakeEncryption::RETRY_PLAIN);
+        // A plaintext handshake carries no RC4 stream, so there is no plaintext retry to arm when
+        // the stream is required to be encrypted.
+        if (!m_encryption.policy().is_retrying() && m_encryption.policy().allow_plaintext_handshake() &&
+            !m_encryption.policy().require_encrypted_stream())
+          m_encryption.policy().set_retry_plaintext();
 
         m_state = READ_ENC_KEY;
 
       } else {
-        // if connection is closed before we read the handshake, it might
-        // be rejected because it is unencrypted, in that case retry encrypted
-        m_encryption.set_retry(HandshakeEncryption::RETRY_ENCRYPTED);
-
         prepare_handshake();
+
+        if (!m_encryption.policy().is_retrying() && m_encryption.policy().allow_encrypted_handshake())
+          m_encryption.policy().set_retry_encrypted();
 
         if (m_incoming)
           m_state = READ_PEER;
@@ -990,10 +1038,12 @@ Handshake::event_write() {
       throw internal_error("event_write called with empty write buffer.");
 
     if (m_writeBuffer.consume(write_unthrottled(m_writeBuffer.position(), m_writeBuffer.remaining()))) {
-      if (m_state == POST_HANDSHAKE)
+      if (m_state == POST_HANDSHAKE) {
         write_done();
-      else
-        this_thread::poll()->remove_write(this);
+        return;
+      }
+
+      this_thread::poll()->remove_write(this);
     }
 
   } catch (const handshake_succeeded&) {
@@ -1003,25 +1053,14 @@ Handshake::event_write() {
     m_manager->receive_failed(this, e.type(), e.error());
 
   } catch (const network_error&) {
-    m_manager->receive_failed(this, ConnectionManager::handshake_failed, e_handshake_network_write_error);
+    m_manager->receive_failed(this, handshake_failed, e_handshake_network_write_error);
   }
-}
-
-void
-Handshake::prepare_proxy_connect() {
-  int advance = snprintf(reinterpret_cast<char*>(m_writeBuffer.position()), m_writeBuffer.reserved_left(),
-                         "CONNECT %s:%hu HTTP/1.0\r\n\r\n", sap_addr_str(m_address).c_str(), sap_port(m_address));
-
-  if (advance == -1 || advance > m_writeBuffer.reserved_left())
-    throw internal_error("Handshake::prepare_proxy_connect() snprintf failed.");
-
-  m_writeBuffer.move_end(advance);
 }
 
 void
 Handshake::prepare_key_plus_pad() {
   if (!m_encryption.initialize())
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_value);
+    throw handshake_error(handshake_failed, e_handshake_invalid_value);
 
   m_encryption.key()->store_pub_key(m_writeBuffer.end(), 96);
   m_writeBuffer.move_end(96);
@@ -1056,10 +1095,14 @@ Handshake::prepare_enc_negotiation() {
   HandshakeEncryption::copy_vc(m_writeBuffer.end());
   m_writeBuffer.move_end(HandshakeEncryption::vc_length);
 
-  if (m_encryption.options() & net::NetworkConfig::encryption_require_RC4)
-    m_writeBuffer.write_32(HandshakeEncryption::crypto_rc4);
+  if (m_encryption.policy().allow_plaintext_stream() && m_encryption.policy().allow_encrypted_stream())
+    m_writeBuffer.write_32(HandshakeEncryption::crypto_plaintext | HandshakeEncryption::crypto_encrypted);
+  else if (m_encryption.policy().allow_plaintext_stream())
+    m_writeBuffer.write_32(HandshakeEncryption::crypto_plaintext);
+  else if (m_encryption.policy().allow_encrypted_stream())
+    m_writeBuffer.write_32(HandshakeEncryption::crypto_encrypted);
   else
-    m_writeBuffer.write_32(HandshakeEncryption::crypto_plain | HandshakeEncryption::crypto_rc4);
+    throw internal_error("Handshake::prepare_enc_negotiation() invalid policy");
 
   m_writeBuffer.write_16(0);
   m_writeBuffer.write_16(handshake_size);
@@ -1095,21 +1138,21 @@ Handshake::prepare_handshake() {
 void
 Handshake::prepare_peer_info() {
   if (std::memcmp(m_readBuffer.position(), m_download->info()->local_id().c_str(), 20) == 0)
-    throw handshake_error(ConnectionManager::handshake_failed, e_handshake_is_self);
+    throw handshake_error(handshake_failed, e_handshake_is_self);
 
   // PeerInfo handling for outgoing connections needs to be moved to
   // HandshakeManager.
-  if (m_peerInfo == NULL) {
+  if (m_peerInfo == nullptr) {
     if (!m_incoming)
       throw internal_error("Handshake::prepare_peer_info() !m_incoming.");
 
     m_peerInfo = m_download->peer_list()->connected(m_address.get(), PeerList::connect_incoming);
 
-    if (m_peerInfo == NULL)
-      throw handshake_error(ConnectionManager::handshake_failed, e_handshake_no_peer_info);
+    if (m_peerInfo == nullptr)
+      throw handshake_error(handshake_failed, e_handshake_no_peer_info);
 
     if (m_peerInfo->failed_counter() > torrent::HandshakeManager::max_failed)
-      throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_toomanyfailed);
+      throw handshake_error(handshake_dropped, e_handshake_toomanyfailed);
 
     m_peerInfo->set_flags(PeerInfo::flag_handshake);
   }
@@ -1123,7 +1166,7 @@ Handshake::prepare_peer_info() {
 
   // For meta downloads, we require support of the extension protocol.
   if (m_download->info()->is_meta_download() && !m_peerInfo->supports_extensions())
-    throw handshake_error(ConnectionManager::handshake_dropped, e_handshake_unwanted_connection);
+    throw handshake_error(handshake_dropped, e_handshake_unwanted_connection);
 }
 
 void
@@ -1173,6 +1216,38 @@ Handshake::write_done() {
   // set it before the call.
   if (m_readDone)
     throw handshake_succeeded();
+}
+
+// TODO: When adding other proxy types, make sure they're require less than the buffer size.
+void
+Handshake::write_proxy() {
+  if (m_proxy->next_action() != net::proxy::state_writing)
+    throw internal_error("Handshake::write_proxy() next_action != state_writing.");
+
+  auto new_bytes = m_writeBuffer.move_end(m_proxy->write(m_writeBuffer.end(), m_writeBuffer.reserved_left()));
+
+  if (new_bytes == 0)
+    throw internal_error("Handshake::write_proxy() m_proxy->write() returned 0.");
+
+  switch (m_proxy->next_action()) {
+  case net::proxy::state_writing:
+    throw internal_error("Handshake::write_proxy() next_action == state_writing after write.");
+
+  case net::proxy::state_reading:
+    this_thread::poll()->remove_write(this);
+    this_thread::poll()->insert_read(this);
+
+    m_state = PROXY_READ;
+    break;
+
+  case net::proxy::state_done:
+    // TODO: When adding other proxy types, we might need to change this.
+    throw internal_error("Handshake::write_proxy() next_action == state_finished after write.");
+    break;
+
+  default:
+    throw internal_error("Handshake::write_proxy() next_action == state_error after write.");
+  }
 }
 
 void
@@ -1256,7 +1331,7 @@ Handshake::event_error() {
   if (m_state == INACTIVE)
     throw internal_error("Handshake::event_error() called on an inactive handshake.");
 
-  m_manager->receive_failed(this, ConnectionManager::handshake_failed, e_handshake_network_socket_error);
+  m_manager->receive_failed(this, handshake_failed, e_handshake_network_socket_error);
 }
 
 } // namespace torrent

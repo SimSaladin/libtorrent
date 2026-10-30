@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <sys/statvfs.h>
 
 #include "manager.h"
 #include "piece.h"
@@ -21,22 +22,18 @@
 #include "torrent/utils/file_stat.h"
 #include "torrent/utils/log.h"
 
-#if HAVE_SYS_VFS_H
-#include <sys/vfs.h>
-#endif
-#if HAVE_SYS_STATVFS_H
-#include <sys/statvfs.h>
-#endif
-#if HAVE_SYS_STATFS_H
-#include <sys/statfs.h>
-#endif
-
-#define LT_LOG_FL(log_level, log_fmt, ...)                              \
-  lt_log_print_data(LOG_STORAGE_##log_level, (&m_data), "file_list", log_fmt, __VA_ARGS__);
+#define LT_LOG_DEBUG(log_fmt, ...)                                      \
+  lt_log_print_hash(LOG_STORAGE_DEBUG, m_data.hash(), "file_list : " log_fmt, __VA_ARGS__);
+#define LT_LOG_EVENTS(log_fmt, ...)                                     \
+  lt_log_print_hash(LOG_STORAGE_EVENTS, m_data.hash(), "file_list : " log_fmt, __VA_ARGS__);
+#define LT_LOG_ERRORS(log_fmt, ...)                                     \
+  lt_log_print_hash(LOG_STORAGE_ERRORS, m_data.hash(), "file_list : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
-static void
+namespace {
+
+void
 verify_file_list(const FileList* fl) {
   if (fl->empty())
     throw internal_error("verify_file_list() 1.", fl->data()->hash());
@@ -49,6 +46,8 @@ verify_file_list(const FileList* fl) {
         (*itr)->match_depth_next() >= (*itr)->path()->size())
       throw internal_error("verify_file_list() 3.", fl->data()->hash());
 }
+
+} // namespace anonymous
 
 FileList::FileList() = default;
 
@@ -87,7 +86,7 @@ FileList::is_multi_file() const {
   // Currently only check if we got just one file. In the future this
   // should be a bool, which will be set based on what flags are
   // passed when the torrent was loaded.
-  return m_multi_file;
+  return m_is_multi_file;
 }
 
 uint64_t
@@ -156,20 +155,37 @@ FileList::set_max_file_size(uint64_t size) {
 // This function should really ensure that we arn't dealing files
 // spread over multiple mount-points.
 uint64_t
-FileList::free_diskspace() const {
+FileList::free_diskspace(cache_list& cache) const {
   uint64_t free_diskspace = std::numeric_limits<uint64_t>::max();
 
   for (const auto& link : m_indirect_links) {
-    FS_STAT_STRUCT m_stat;
-    auto fn = link.c_str();
+    auto cache_itr = std::find_if(cache.begin(), cache.end(), [&link](const auto& cacheEntry) {
+      return cacheEntry.first == link;
+    });
 
-    if (!(FS_STAT_FN))
-      continue;
+    if (cache_itr == cache.end()) {
+      struct statvfs stat{};
 
-    free_diskspace = std::min<uint64_t>(free_diskspace, (int64_t)(FS_STAT_BLOCK_SIZE) * m_stat.f_bavail);
+      auto fn = link.c_str();
+
+      if (statvfs(fn, &stat) == -1)
+        continue;
+
+      cache.push_back(std::make_pair(link, static_cast<uint64_t>(stat.f_frsize) * stat.f_bavail));
+      cache_itr = std::prev(cache.end());
+    }
+
+    if (cache_itr->second < free_diskspace)
+      free_diskspace = cache_itr->second;
   }
 
   return free_diskspace != std::numeric_limits<uint64_t>::max() ? free_diskspace : 0;
+}
+
+uint64_t
+FileList::free_diskspace_no_cache() const {
+  cache_list cache;
+  return free_diskspace(cache);
 }
 
 FileList::iterator_range
@@ -282,9 +298,6 @@ FileList::update_paths(iterator first, iterator last) {
 
 bool
 FileList::make_root_path() {
-  if (!is_open())
-    return false;
-
   return ::mkdir(m_root_dir.c_str(), 0777) == 0 || errno == EEXIST;
 }
 
@@ -309,7 +322,13 @@ FileList::make_all_paths() {
     auto firstMismatch = entry->path()->begin();
 
     // Couldn't find a suitable stl algo, need to write my own.
-    while (firstMismatch != entry->path()->end() && lastPathItr != lastPath->end() && *firstMismatch == *lastPathItr) {
+    while (true) {
+      if (firstMismatch == entry->path()->end() || lastPathItr == lastPath->end())
+        break;
+
+      if (firstMismatch->str() != lastPathItr->str())
+        break;
+
       lastPathItr++;
       firstMismatch++;
     }
@@ -333,6 +352,11 @@ FileList::initialize(uint64_t torrentSize, uint32_t chunkSize) {
 
   if (chunkSize == 0)
     throw internal_error("FileList::initialize() chunk_size() == 0.", data()->hash());
+
+  uint64_t chunk_count = torrentSize / chunkSize + (torrentSize % chunkSize != 0);
+
+  if (chunk_count > std::numeric_limits<Bitfield::size_type>::max())
+    throw input_error("Torrent has more chunks than the chunk index can address.");
 
   m_chunk_size = chunkSize;
   m_torrent_size = torrentSize;
@@ -362,23 +386,28 @@ void
 FileList::open(bool hashing, int flags) {
   using path_set = std::set<const char*, file_list_cstr_less>;
 
-  LT_LOG_FL(INFO, "Opening.", 0);
+  LT_LOG_EVENTS("open", 0);
 
   if (m_root_dir.empty())
     throw internal_error("FileList::open() m_root_dir.empty().", data()->hash());
 
+  // Rebuilt below by make_directory, so start from empty rather than
+  // depend on a preceding close().
+  m_indirect_links.clear();
   m_indirect_links.push_back(m_root_dir);
 
   Path lastPath;
   path_set pathSet;
 
-  auto itr = end();
+  const File* current_file = nullptr;
 
   try {
     if (!(flags & open_no_create) && !make_root_path())
       throw storage_error("Could not create directory '" + m_root_dir + "': " + std::strerror(errno));
 
     for (auto& entry : *this) {
+      current_file = entry.get();
+
       // We no longer consider it an error to open a previously opened
       // FileList as we now use the same function to create
       // non-existent files.
@@ -393,6 +422,9 @@ FileList::open(bool hashing, int flags) {
 
       // Update the path during open so that any changes to root dir
       // and file paths are properly handled.
+      if (entry->path()->empty())
+        throw storage_error("Empty filename is not allowed.");
+
       if (entry->path()->back().empty())
         entry->set_frozen_path(std::string());
       else
@@ -404,8 +436,6 @@ FileList::open(bool hashing, int flags) {
       if (entry->size_bytes() > m_max_file_size)
         throw storage_error("File exceedes the configured max file size.");
 
-      if (entry->path()->empty())
-        throw storage_error("Empty filename is not allowed.");
 
       // Handle directory creation outside of open_file, so we can do
       // it here if necessary.
@@ -427,15 +457,15 @@ FileList::open(bool hashing, int flags) {
     }
 
   } catch (const local_error& e) {
-    for (auto& entry : *this) {
+    for (auto& entry : *this)
       entry->unset_flags_protected(File::flag_active);
-      manager->file_manager()->close(entry.get());
-    }
 
-    if (itr == end()) {
-      LT_LOG_FL(ERROR, "Failed to prepare file list: %s", e.what());
+    manager->file_manager()->close_files(*this);
+
+    if (current_file == nullptr) {
+      LT_LOG_ERRORS("failed to prepare file list : %s", e.what());
     } else {
-      LT_LOG_FL(ERROR, "Failed to prepare file '%s': %s", (*itr)->path()->as_string().c_str(), e.what());
+      LT_LOG_ERRORS("failed to prepare file : path:%s error:%s", current_file->path()->as_string().c_str(), e.what());
     }
 
     // Set to false here in case we tried to open the FileList for the
@@ -445,7 +475,8 @@ FileList::open(bool hashing, int flags) {
   }
 
   m_is_open = true;
-  m_frozen_root_dir = m_root_dir;
+
+  m_frozen_root_dir.reset(m_root_dir);
 
   // For meta-downloads, if the file exists, we have to assume that
   // it is either 0 or 1 length or the correct size. If the size
@@ -457,7 +488,7 @@ FileList::open(bool hashing, int flags) {
     utils::FileStat stat;
 
     // This probably recurses into open() once, but that is harmless.
-    if (stat.update((*begin())->frozen_path()) && stat.size() > 1)
+    if (stat.update((*begin())->frozen_path().str()) && stat.size() > 1)
       return reset_filesize(stat.size());
   }
 }
@@ -467,12 +498,12 @@ FileList::close() {
   if (!is_open())
     return;
 
-  LT_LOG_FL(INFO, "Closing.", 0);
+  LT_LOG_EVENTS("close", 0);
 
-  for (auto& entry : *this) {
+  for (auto& entry : *this)
     entry->unset_flags_protected(File::flag_active);
-    manager->file_manager()->close(entry.get());
-  }
+
+  manager->file_manager()->close_files(*this);
 
   m_is_open = false;
   m_indirect_links.clear();
@@ -485,23 +516,22 @@ FileList::close_all_files() {
   if (!is_open())
     return;
 
-  LT_LOG_FL(INFO, "Closing all files.", 0);
+  LT_LOG_EVENTS("close all files", 0);
 
-  for (auto& entry : *this)
-    manager->file_manager()->close(entry.get());
+  manager->file_manager()->close_files(*this);
 }
 
 void
-FileList::make_directory(Path::const_iterator pathBegin, Path::const_iterator pathEnd, Path::const_iterator startItr) {
+FileList::make_directory(Path::const_iterator path_begin, Path::const_iterator path_end, Path::const_iterator start_itr) {
   std::string path = m_root_dir;
 
-  while (pathBegin != pathEnd) {
-    path += "/" + *pathBegin;
+  while (path_begin != path_end) {
+    path += "/" + path_begin->str();
 
-    if (pathBegin++ != startItr)
+    if (path_begin++ != start_itr)
       continue;
 
-    startItr++;
+    start_itr++;
 
     utils::FileStat fileStat;
 
@@ -510,7 +540,7 @@ FileList::make_directory(Path::const_iterator pathBegin, Path::const_iterator pa
         std::find(m_indirect_links.begin(), m_indirect_links.end(), path) == m_indirect_links.end())
       m_indirect_links.push_back(path);
 
-    if (pathBegin == pathEnd)
+    if (path_begin == path_end)
       break;
 
     if (::mkdir(path.c_str(), 0777) != 0 && errno != EEXIST)
@@ -529,7 +559,7 @@ FileList::open_file(File* file_node, const Path& lastPath, bool hashing, int fla
     auto firstMismatch = path->begin();
 
     // Couldn't find a suitable stl algo, need to write my own.
-    while (firstMismatch != path->end() && lastItr != lastPath.end() && *firstMismatch == *lastItr) {
+    while (firstMismatch != path->end() && lastItr != lastPath.end() && firstMismatch->str() == lastItr->str()) {
       lastItr++;
       firstMismatch++;
     }
@@ -544,10 +574,8 @@ FileList::open_file(File* file_node, const Path& lastPath, bool hashing, int fla
 
   utils::FileStat file_stat;
 
-  if (file_stat.update(file_node->frozen_path()) &&
-      !file_stat.is_regular() && !file_stat.is_link()) {
-    // Might also bork on other kinds of file types, but there's no
-    // suitable errno for all cases.
+  if (file_stat.update(file_node->frozen_path().str()) && !file_stat.is_regular() && !file_stat.is_link()) {
+    // Might also fail on other kinds of file types, but there's no suitable errno for all cases.
     errno = EISDIR;
     return false;
   }
@@ -634,12 +662,12 @@ FileList::create_chunk(uint64_t offset, uint32_t length, bool hashing, int prot)
 
 Chunk*
 FileList::create_chunk_index(uint32_t index, int prot) {
-  return create_chunk(static_cast<uint64_t>(index) * chunk_size(), chunk_index_size(index), false, prot);
+  return create_chunk(chunk_index_position(index), chunk_index_size(index), false, prot);
 }
 
 Chunk*
 FileList::create_hashing_chunk_index(uint32_t index, int prot) {
-  return create_chunk(static_cast<uint64_t>(index) * chunk_size(), chunk_index_size(index), true, prot);
+  return create_chunk(chunk_index_position(index), chunk_index_size(index), true, prot);
 }
 
 void
@@ -659,7 +687,7 @@ FileList::mark_completed(uint32_t index) {
   if (bitfield()->size_set() >= bitfield()->size_bits())
     throw internal_error("FileList::mark_completed(...) bitfield()->size_set() >= bitfield()->size_bits().", data()->hash());
 
-  LT_LOG_FL(DEBUG, "Done chunk: index:%" PRIu32 ".", index);
+  LT_LOG_DEBUG("done chunk : index:%" PRIu32 ".", index);
 
   m_data.mutable_completed_bitfield()->set(index);
   inc_completed(begin(), index);
@@ -683,7 +711,7 @@ FileList::inc_completed(iterator firstItr, uint32_t index) {
 
   // TODO: Check if this works right for zero-length files.
   std::for_each(firstItr,
-                lastItr == end() ? end() : (lastItr + 1),
+                lastItr == end() || (*lastItr)->range_first() > index ? lastItr : (lastItr + 1),
                 std::mem_fn(&File::inc_completed_protected));
 
   return lastItr;
@@ -720,7 +748,7 @@ FileList::update_completed() {
 // Used for metadata downloads.
 void
 FileList::reset_filesize(int64_t size) {
-  LT_LOG_FL(INFO, "Resetting torrent size: size:%" PRIi64 ".", size);
+  LT_LOG_EVENTS("reset torrent size : size:%" PRIi64 ".", size);
 
   close();
   m_chunk_size = size;

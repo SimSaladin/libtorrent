@@ -1,5 +1,7 @@
 #include "config.h"
 
+#include "torrent/runtime/socket_manager.h"
+
 #include "curl_stack.h"
 
 #include <algorithm>
@@ -9,24 +11,42 @@
 #include "net/curl_get.h"
 #include "net/curl_socket.h"
 #include "torrent/exceptions.h"
-#include "torrent/utils/thread.h"
+#include "torrent/system/thread.h"
+#include "torrent/utils/log.h"
+
+#define LT_LOG_GET(log_fmt, ...) \
+  lt_log_print(LOG_NET_HTTP, "%p->http_get : " log_fmt, curl_get.get(), __VA_ARGS__)
+
+#define lt_easy_setopt(handle, option, value) \
+  { \
+    CURLcode code = curl_easy_setopt(handle, option, value); \
+    if (code != CURLE_OK) \
+      throw torrent::internal_error("Error calling curl_easy_setopt(" #option "): " + std::string(curl_easy_strerror(code))); \
+  }
+
+#define lt_multi_setopt(handle, option, value) \
+  { \
+    CURLMcode code = curl_multi_setopt(handle, option, value); \
+    if (code != CURLM_OK) \
+      throw torrent::internal_error("Error calling curl_multi_setopt(" #option "): " + std::string(curl_multi_strerror(code))); \
+  }
 
 namespace torrent::net {
 
-CurlStack::CurlStack(utils::Thread* thread)
+CurlStack::CurlStack(system::Thread* thread)
   : m_thread(thread),
     m_handle(curl_multi_init()) {
 
   m_task_timeout.slot() = [this]() { receive_timeout(); };
 
-  curl_multi_setopt(m_handle, CURLMOPT_TIMERDATA, this);
-  curl_multi_setopt(m_handle, CURLMOPT_TIMERFUNCTION, &CurlStack::set_timeout);
-  curl_multi_setopt(m_handle, CURLMOPT_SOCKETDATA, this);
-  curl_multi_setopt(m_handle, CURLMOPT_SOCKETFUNCTION, &CurlSocket::receive_socket);
+  lt_multi_setopt(m_handle, CURLMOPT_TIMERDATA, this);
+  lt_multi_setopt(m_handle, CURLMOPT_TIMERFUNCTION, &CurlStack::set_timeout);
+  lt_multi_setopt(m_handle, CURLMOPT_SOCKETDATA, this);
+  lt_multi_setopt(m_handle, CURLMOPT_SOCKETFUNCTION, &CurlSocket::receive_socket);
 
-  curl_multi_setopt(m_handle, CURLMOPT_MAXCONNECTS, m_max_cache_connections);
-  curl_multi_setopt(m_handle, CURLMOPT_MAX_HOST_CONNECTIONS, m_max_host_connections);
-  curl_multi_setopt(m_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, m_max_total_connections);
+  lt_multi_setopt(m_handle, CURLMOPT_MAXCONNECTS, m_max_cache_connections);
+  lt_multi_setopt(m_handle, CURLMOPT_MAX_HOST_CONNECTIONS, m_max_host_connections);
+  lt_multi_setopt(m_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, m_max_total_connections);
 }
 
 CurlStack::~CurlStack() {
@@ -36,40 +56,38 @@ CurlStack::~CurlStack() {
 void
 CurlStack::set_max_cache_connections(unsigned int value) {
   if (value > 1024)
-    throw torrent::internal_error("CurlStack::set_max_cache_connections() called with a value greater than 1024.");
+    throw torrent::input_error("CurlStack::set_max_cache_connections() called with a value greater than 1024.");
 
   auto guard = lock_guard();
 
   m_max_cache_connections = value;
 
-  if (curl_multi_setopt(m_handle, CURLMOPT_MAXCONNECTS, value) != CURLM_OK)
-    throw torrent::internal_error("CurlStack::set_max_cache_connections() error calling curl_multi_setopt.");
+  lt_multi_setopt(m_handle, CURLMOPT_MAXCONNECTS, value);
 }
 
 void
 CurlStack::set_max_host_connections(unsigned int value) {
   if (value > 1024)
-    throw torrent::internal_error("CurlStack::set_max_host_connections() called with a value greater than 1024.");
+    throw torrent::input_error("CurlStack::set_max_host_connections() called with a value greater than 1024.");
 
   auto guard = lock_guard();
 
   m_max_host_connections = value;
 
-  if (curl_multi_setopt(m_handle, CURLMOPT_MAX_HOST_CONNECTIONS, value) != CURLM_OK)
-    throw torrent::internal_error("CurlStack::set_max_host_connections() error calling curl_multi_setopt.");
+  lt_multi_setopt(m_handle, CURLMOPT_MAX_HOST_CONNECTIONS, value);
 }
 
 void
 CurlStack::set_max_total_connections(unsigned int value) {
-  if (value > 4096)
-    throw torrent::internal_error("CurlStack::set_max_total_connections() called with a value greater than 4096.");
+  if (value > torrent::runtime::SocketManager::http_max_alloc)
+    throw torrent::internal_error("CurlStack::set_max_total_connections() called with a value greater than " +
+                                  std::to_string(torrent::runtime::SocketManager::http_max_alloc) + ".");
 
   auto guard = lock_guard();
 
   m_max_total_connections = value;
 
-  if (curl_multi_setopt(m_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, value) != CURLM_OK)
-    throw torrent::internal_error("CurlStack::set_max_total_connections() error calling curl_multi_setopt.");
+  lt_multi_setopt(m_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, value);
 }
 
 void
@@ -92,13 +110,26 @@ CurlStack::shutdown() {
 }
 
 void
+CurlStack::clear_requests() {
+  assert(std::this_thread::get_id() == m_thread->thread_id());
+
+  for (auto& curl_get : *this)
+    curl_get->trigger_cleared_request();
+}
+
+void
 CurlStack::start_get(const std::shared_ptr<CurlGet>& curl_get) {
   assert(std::this_thread::get_id() == m_thread->thread_id());
 
   if (curl_get == nullptr)
     throw torrent::internal_error("CurlStack::start_get() called with a null curl_get.");
 
-  { auto guard = std::scoped_lock(m_mutex, curl_get->mutex());
+  LT_LOG_GET("starting : %s", curl_get->url().c_str());
+
+  { auto lock_main = std::unique_lock(m_mutex, std::defer_lock);
+    auto lock_get  = std::unique_lock(curl_get->mutex(), std::defer_lock);
+
+    std::lock(lock_main, lock_get);
 
     // TODO: Check is_running, if not return error. Do not throw internal_error.
     if (!m_running)
@@ -109,34 +140,39 @@ CurlStack::start_get(const std::shared_ptr<CurlGet>& curl_get) {
       return; // CurlGet was already closed.
 
     if (!m_user_agent.empty())
-      curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_USERAGENT, m_user_agent.c_str());
+      lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_USERAGENT, m_user_agent.c_str());
 
     if (!m_http_proxy.empty())
-      curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_PROXY, m_http_proxy.c_str());
+      lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_PROXY, m_http_proxy.c_str());
 
     if (!m_http_ca_path.empty())
-      curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_CAPATH, m_http_ca_path.c_str());
+      lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_CAPATH, m_http_ca_path.c_str());
 
     if (!m_http_ca_cert.empty())
-      curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_CAINFO, m_http_ca_cert.c_str());
+      lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_CAINFO, m_http_ca_cert.c_str());
 
-    curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_SSL_VERIFYHOST, m_ssl_verify_host ? 2l : 0l);
-    curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_SSL_VERIFYPEER, m_ssl_verify_peer ? 1l : 0l);
-    curl_easy_setopt(curl_get->handle_unsafe(), CURLOPT_DNS_CACHE_TIMEOUT, m_dns_timeout);
+    lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_SSL_VERIFYHOST, m_ssl_verify_host ? 2l : 0l);
+    lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_SSL_VERIFYPEER, m_ssl_verify_peer ? 1l : 0l);
+    lt_easy_setopt(curl_get->handle_unsafe(), CURLOPT_DNS_CACHE_TIMEOUT, m_dns_timeout);
 
     base_type::push_back(curl_get);
+    m_size = base_type::size();
 
     // Calling curl_multi_add_handle() can result in CurlSocket::receive_socket() being called,
     // which calls CurlStack::is_running().
-    m_mutex.unlock();
+    lock_main.unlock();
 
     curl_get->activate_unsafe();
   }
+
+  ensure_timeout_scheduled();
 }
 
 void
 CurlStack::close_get(const std::shared_ptr<CurlGet>& curl_get) {
   assert(std::this_thread::get_id() == m_thread->thread_id());
+
+  bool was_active{};
 
   { auto guard_get = curl_get->lock_guard();
 
@@ -147,10 +183,15 @@ CurlStack::close_get(const std::shared_ptr<CurlGet>& curl_get) {
         throw torrent::internal_error("CurlStack::close_get() called on a CurlGet that is not in the stack.");
 
       base_type::erase(itr);
+      m_size = base_type::size();
+
+      was_active = true;
     }
 
     curl_get->cleanup_unsafe();
   }
+
+  LT_LOG_GET("closed : %s", was_active ? "active" : "inactive");
 
   curl_get->notify_closed();
 }
@@ -197,16 +238,29 @@ CurlStack::receive_timeout() {
     return;
   }
 
-  if (!m_task_timeout.is_scheduled()) {
-    // Sometimes libcurl forgets to reset the timeout. Try to poll the value in that case, or use 10
-    // seconds max.
-    long timeout_ms;
-    curl_multi_timeout(m_handle, &timeout_ms);
+  ensure_timeout_scheduled();
+}
 
-    auto timeout = std::max<std::chrono::microseconds>(std::chrono::milliseconds(timeout_ms), 10s);
+// The multi-socket API only enforces CURLOPT_TIMEOUT when libcurl is driven by socket activity or
+// the timer task. If the timer is not scheduled while transfers are active (e.g. libcurl cleared
+// it, or a connection through a dead proxy never produces socket events), a hung transfer would
+// never time out. Guarantee the stack is polled at least every 10 seconds while non-empty.
+void
+CurlStack::ensure_timeout_scheduled() {
+  assert(std::this_thread::get_id() == m_thread->thread_id());
 
-    torrent::this_thread::scheduler()->wait_for_ceil_seconds(&m_task_timeout, timeout);
-  }
+  if (base_type::empty() || m_task_timeout.is_scheduled())
+    return;
+
+  long timeout_ms{};
+  curl_multi_timeout(m_handle, &timeout_ms);
+
+  std::chrono::microseconds timeout = 10s;
+
+  if (timeout_ms >= 0)
+    timeout = std::min<std::chrono::microseconds>(std::chrono::milliseconds(timeout_ms), timeout);
+
+  torrent::this_thread::scheduler()->wait_for_ceil_seconds(&m_task_timeout, timeout);
 }
 
 // TODO: Check if curl_get is still active.

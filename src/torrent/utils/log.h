@@ -9,54 +9,14 @@
 
 #include <torrent/common.h>
 
+// TODO: Move to system.
+
 namespace torrent {
 
-// TODO: Add option_strings support.
 enum {
-  LOG_CRITICAL,
-  LOG_ERROR,
-  LOG_WARN,
-  LOG_NOTICE,
-  LOG_INFO,
-  LOG_DEBUG,
-
-  LOG_PEER_CRITICAL,
-  LOG_PEER_ERROR,
-  LOG_PEER_WARN,
-  LOG_PEER_NOTICE,
-  LOG_PEER_INFO,
-  LOG_PEER_DEBUG,
-
-  // TODO: Deprecate, not used.
-  LOG_SOCKET_CRITICAL,
-  LOG_SOCKET_ERROR,
-  LOG_SOCKET_WARN,
-  LOG_SOCKET_NOTICE,
-  LOG_SOCKET_INFO,
-  LOG_SOCKET_DEBUG,
-
-  LOG_STORAGE_CRITICAL,
-  LOG_STORAGE_ERROR,
-  LOG_STORAGE_WARN,
-  LOG_STORAGE_NOTICE,
-  LOG_STORAGE_INFO,
-  LOG_STORAGE_DEBUG,
-
-  LOG_THREAD_CRITICAL,
-  LOG_THREAD_ERROR,
-  LOG_THREAD_WARN,
-  LOG_THREAD_NOTICE,
-  LOG_THREAD_INFO,
-  LOG_THREAD_DEBUG,
-
-  LOG_TORRENT_CRITICAL,
-  LOG_TORRENT_ERROR,
-  LOG_TORRENT_WARN,
-  LOG_TORRENT_NOTICE,
-  LOG_TORRENT_INFO,
-  LOG_TORRENT_DEBUG,
-
-  LOG_NON_CASCADING,
+  LOG_ERRORS,
+  LOG_EVENTS,
+  LOG_DEBUG_TRACE,
 
   LOG_CONNECTION,
   LOG_CONNECTION_BIND,
@@ -82,8 +42,10 @@ enum {
   LOG_MOCK_CALLS,
 
   LOG_NET_DNS,
+  LOG_NET_HTTP,
   LOG_NET_SOCKET,
 
+  LOG_PEER_CHOKE_QUEUE,
   LOG_PEER_LIST_EVENTS,
   LOG_PEER_LIST_ADDRESS,
 
@@ -98,8 +60,16 @@ enum {
   LOG_RPC_DUMP,
 
   LOG_SESSION_EVENTS,
-  LOG_STORAGE,
+  LOG_STORAGE_DEBUG,
+  LOG_STORAGE_EVENTS,
+  LOG_STORAGE_ERRORS,
+
   LOG_SYSTEM,
+  LOG_SYSTEM_POLL,
+  LOG_SYSTEM_THREAD,
+
+  LOG_TORRENT_DEBUG,
+  LOG_TORRENT_EVENTS,
 
   LOG_TRACKER_DUMP,
   LOG_TRACKER_EVENTS,
@@ -114,35 +84,31 @@ enum {
 
 #define lt_log_print(log_group, ...)                                    \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(NULL, NULL, NULL, 0, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_print(NULL, __VA_ARGS__); }
 
-#define lt_log_print_hash(log_group, log_hash, log_subsystem, ...)      \
+#define lt_log_print_hash(log_group, log_hash, ...)                     \
   { if (torrent::log_groups[log_group].valid())                         \
-    torrent::log_groups[log_group].internal_print(&log_hash, log_subsystem, NULL, 0, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_print(&log_hash, __VA_ARGS__); }
 
-#define lt_log_print_info(log_group, log_info, log_subsystem, ...)      \
+#define lt_log_print_info(log_group, log_info, ...)                     \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(&log_info->hash(), log_subsystem, NULL, 0, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_print(&log_info->hash(), __VA_ARGS__); }
 
-#define lt_log_print_data(log_group, log_data, log_subsystem, ...)      \
+#define lt_log_print_data(log_group, log_data, ...)                     \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(&log_data->hash(), log_subsystem, NULL, 0, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_print(&log_data->hash(), __VA_ARGS__); }
 
 #define lt_log_print_dump(log_group, log_dump_data, log_dump_size, ...) \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(NULL, NULL, log_dump_data, log_dump_size, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_dump(NULL, log_dump_data, log_dump_size, __VA_ARGS__); }
 
-#define lt_log_print_hash_dump(log_group, log_dump_data, log_dump_size, log_hash, log_subsystem, ...) \
+#define lt_log_print_hash_dump(log_group, log_dump_data, log_dump_size, log_hash, ...) \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(&log_hash, log_subsystem, log_dump_data, log_dump_size, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_dump(&log_hash, log_dump_data, log_dump_size, __VA_ARGS__); }
 
-#define lt_log_print_info_dump(log_group, log_dump_data, log_dump_size, log_info, log_subsystem, ...) \
+#define lt_log_print_info_dump(log_group, log_dump_data, log_dump_size, log_info, ...) \
   { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(&log_info->hash(), log_subsystem, log_dump_data, log_dump_size, __VA_ARGS__); }
-
-#define lt_log_print_subsystem(log_group, log_subsystem, ...)           \
-  { if (torrent::log_groups[log_group].valid())                         \
-      torrent::log_groups[log_group].internal_print(NULL, log_subsystem, NULL, 0, __VA_ARGS__); }
+      torrent::log_groups[log_group].internal_dump(&log_info->hash(), log_dump_data, log_dump_size, __VA_ARGS__); }
 
 using log_slot = std::function<void(const char*, size_t, int)>;
 
@@ -166,9 +132,9 @@ public:
   // Internal:
   //
 
-  void                internal_print(const HashString* hash, const char* subsystem,
-                                     const void* dump_data, size_t dump_size,
-                                     const char* fmt, ...);
+  void                internal_print(const std::string& message);
+  void                internal_print(const HashString* hash, const char* fmt, ...);
+  void                internal_dump(const HashString* hash, const void* dump_data, size_t dump_size, const char* fmt, ...);
 
   const outputs_type& outputs() const                    { return m_outputs; }
   const outputs_type& cached_outputs() const             { return m_cached_outputs; }

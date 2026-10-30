@@ -6,11 +6,12 @@
 
 #include "dht/dht_bucket.h"
 #include "dht/dht_node.h"
+#include "net/address_list.h"
 #include "tracker/tracker_dht.h"
 
 namespace torrent::dht {
 
-DhtAnnounce::DhtAnnounce(DhtServer* server, const HashString& infoHash, TrackerDht* tracker)
+DhtAnnounce::DhtAnnounce(DhtServer* server, const HashString& infoHash, std::weak_ptr<TrackerDht> tracker)
   : DhtSearch(server, infoHash),
     m_tracker(tracker) {
 }
@@ -18,25 +19,27 @@ DhtAnnounce::DhtAnnounce(DhtServer* server, const HashString& infoHash, TrackerD
 DhtAnnounce::~DhtAnnounce() {
   assert(complete() && "DhtAnnounce::~DhtAnnounce called while announce not complete.");
 
-  const char* failure = NULL;
+  TrackerDht::add_event(m_tracker, [contacted = m_contacted, replied = m_replied](TrackerDht* tracker) {
+      const char* failure = nullptr;
 
-  if (m_tracker->get_dht_state() != TrackerDht::state_announcing) {
-    if (!m_contacted)
-      failure = "No DHT nodes available for peer search.";
-    else
-      failure = "DHT search unsuccessful.";
+      if (tracker->dht_state() != TrackerDht::state_announcing) {
+        if (!contacted)
+          failure = "No DHT nodes available for peer search.";
+        else
+          failure = "DHT search unsuccessful.";
 
-  } else {
-    if (!m_contacted)
-      failure = "DHT search unsuccessful.";
-    else if (m_replied == 0 && !m_tracker->has_peers())
-      failure = "Announce failed";
-  }
+      } else {
+        if (!contacted)
+          failure = "DHT search unsuccessful.";
+        else if (replied == 0) // && !tracker->has_peers_unsafe())
+          failure = "Announce failed";
+      }
 
-  if (failure != NULL)
-    m_tracker->receive_failed(failure);
-  else
-    m_tracker->receive_success();
+      if (failure != nullptr)
+        tracker->receive_failed(failure);
+      else
+        tracker->receive_success();
+    });
 }
 
 DhtSearch::const_accessor
@@ -51,9 +54,12 @@ DhtAnnounce::start_announce() {
 
   m_contacted = m_pending = size();
   m_replied = 0;
-  m_tracker->set_dht_state(TrackerDht::state_announcing);
 
-  for (const auto& [node, _] : *this)
+  TrackerDht::add_event(m_tracker, [](TrackerDht* tracker) {
+      tracker->set_dht_announce_state();
+    });
+
+  for (const auto& node : *this)
     set_node_active(node, true);
 
   return const_accessor(begin());
@@ -61,12 +67,19 @@ DhtAnnounce::start_announce() {
 
 void
 DhtAnnounce::receive_peers(raw_list peers) {
-  m_tracker->receive_peers(peers);
+  AddressList address_list;
+  address_list.parse_address_bencode(peers);
+
+  TrackerDht::add_event(m_tracker, [address_list = std::move(address_list)](TrackerDht* tracker) mutable {
+      tracker->receive_peers(std::move(address_list));
+    });
 }
 
 void
 DhtAnnounce::update_status() {
-  m_tracker->receive_progress(m_replied, m_contacted);
+  TrackerDht::add_event(m_tracker, [contacted = m_contacted, replied = m_replied](TrackerDht* tracker) {
+      tracker->receive_progress(replied, contacted);
+    });
 }
 
 } // namespace torrent::dht

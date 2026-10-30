@@ -1,9 +1,12 @@
 #ifndef LIBTORRENT_TORRENT_UTILS_STRING_MANIP_H
 #define LIBTORRENT_TORRENT_UTILS_STRING_MANIP_H
 
+#include <cstdint>
+#include <exception>
+#include <optional>
 #include <string>
 #include <string_view>
-#include <exception>
+#include <vector>
 #include <torrent/common.h>
 #include <torrent/exceptions.h>
 
@@ -11,6 +14,9 @@ namespace torrent::utils {
 
 // TODO: Add a copy_escape_html() version that copies to a perfect sized std::string.
 // TODO: Consider forward declaring these functions, and instantiating the required specializations in the .cc file.
+
+bool             is_valid_utf8(const std::string& str) LIBTORRENT_EXPORT;
+bool             is_valid_utf8_text(const std::string& str) LIBTORRENT_EXPORT;
 
 std::string_view trim_spaces(std::string_view s) LIBTORRENT_EXPORT;
 std::string      trim_spaces_str(std::string_view s) LIBTORRENT_EXPORT;
@@ -21,22 +27,25 @@ std::string      sanitize_string(const std::string& str) LIBTORRENT_EXPORT;
 std::string      sanitize_string_with_escape_codes(const std::string& str) LIBTORRENT_EXPORT;
 std::string      sanitize_string_with_tags(const std::string& str) LIBTORRENT_EXPORT;
 
+std::string                         transform_to_base64(const std::string& src) LIBTORRENT_EXPORT;
+std::optional<std::vector<uint8_t>> transform_from_base64_unsafe(const std::string& src) LIBTORRENT_EXPORT;
+
 char             hex_to_value_or_zero(char c);
 char             hex_to_value_or_error(char c);
 char             value_to_hex0(char value);
 char             value_to_hex1(char value);
 
 template <typename Container>
-std::string      copy_escape_html_str(const Container& src);
+std::string                     copy_escape_html_str(const Container& src);
 
 template <typename SrcItr>
-std::string      copy_escape_html_str(SrcItr src_first, SrcItr src_last);
+std::string                     copy_escape_html_str(SrcItr src_first, SrcItr src_last);
 
 template <typename SrcItr, typename DestItr>
-DestItr          copy_escape_html(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
+DestItr                         copy_escape_html(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DestItr>
-DestItr          copy_escape_html(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
+DestItr                         copy_escape_html(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DstContainer>
 typename DstContainer::iterator copy_escape_html(const SrcContainer& src, DstContainer& dst);
@@ -45,10 +54,10 @@ template <typename SrcItr, typename DstContainer>
 typename DstContainer::iterator copy_escape_html(SrcItr src_first, SrcItr src_last, DstContainer& dst);
 
 template <typename SrcItr, typename DestItr>
-DestItr          transform_from_hex(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
+DestItr                         transform_from_hex(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DestItr>
-DestItr          transform_from_hex(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
+DestItr                         transform_from_hex(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DstContainer>
 typename DstContainer::iterator transform_from_hex(const SrcContainer& src, DstContainer& dst);
@@ -57,10 +66,10 @@ template <typename SrcItr, typename DstContainer>
 typename DstContainer::iterator transform_from_hex(SrcItr src_first, SrcItr src_last, DstContainer& dst);
 
 template <typename SrcItr, typename DestItr>
-DestItr          transform_to_hex(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
+DestItr                         transform_to_hex(SrcItr src_first, SrcItr src_last, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DestItr>
-DestItr          transform_to_hex(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
+DestItr                         transform_to_hex(const SrcContainer& src, DestItr dst_first, DestItr dst_last);
 
 template <typename SrcContainer, typename DstContainer>
 typename DstContainer::iterator transform_to_hex(const SrcContainer& src, DstContainer& dst);
@@ -69,10 +78,10 @@ template <typename SrcItr, typename DstContainer>
 typename DstContainer::iterator transform_to_hex(SrcItr src_first, SrcItr src_last, DstContainer& dst);
 
 template <typename Container>
-std::string      transform_to_hex_str(const Container& src);
+std::string                     transform_to_hex_str(const Container& src);
 
 template <typename SrcItr>
-std::string      transform_to_hex_str(SrcItr src_first, SrcItr src_last);
+std::string                     transform_to_hex_str(SrcItr src_first, SrcItr src_last);
 
 
 //

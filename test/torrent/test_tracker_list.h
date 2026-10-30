@@ -22,6 +22,9 @@ class TestTrackerList : public TestFixtureWithMainNetTrackerThread {
   CPPUNIT_TEST(test_scrape_success);
   CPPUNIT_TEST(test_scrape_failure);
 
+  CPPUNIT_TEST(test_failure_message_sanitized);
+  CPPUNIT_TEST(test_scrape_failure_message_sanitized);
+
   CPPUNIT_TEST(test_has_active);
 
   CPPUNIT_TEST_SUITE_END();
@@ -44,21 +47,29 @@ public:
   void test_scrape_success();
   void test_scrape_failure();
 
+  void test_failure_message_sanitized();
+  void test_scrape_failure_message_sanitized();
+
   void test_has_active();
 };
 
+void process_main_and_tracker(TestFixtureWithMainAndTrackerThread* fixture);
+void process_main_and_tracker(TestFixtureWithMainNetTrackerThread* fixture);
 bool check_has_active_in_group(const torrent::TrackerList* tracker_list, const char* states, bool scrape);
 
 struct TestTrackerListWrapper {
   TestTrackerListWrapper(torrent::TrackerList* tracker_list) : m_tracker_list(tracker_list) {}
 
-  void                set_info(torrent::DownloadInfo* info) { m_tracker_list->set_info(info); }
+  void set_info(torrent::DownloadInfo* info) { m_tracker_list->set_info(info); }
 
   torrent::TrackerList* m_tracker_list;
 };
 
 #define TRACKER_LIST_SETUP()                                            \
   torrent::DownloadInfo download_info;                                  \
+  download_info.slot_left() = []() { return 0; };                       \
+  download_info.slot_completed() = []() { return 0; };                  \
+                                                                        \
   torrent::TrackerList tracker_list;                                    \
   TestTrackerListWrapper(&tracker_list).set_info(&download_info);       \
                                                                         \
@@ -72,13 +83,13 @@ struct TestTrackerListWrapper {
   tracker_list.slot_scrape_success() = std::bind(&increment_value_void, &scrape_success_counter); \
   tracker_list.slot_scrape_failure() = std::bind(&increment_value_void, &scrape_failure_counter);
 
-#define TRACKER_INSERT(group, name)                         \
-  auto name = TrackerTest::new_tracker(&tracker_list, "");  \
+#define TRACKER_INSERT(group, name)                                 \
+  auto name = TrackerTest::new_tracker(&tracker_list, group, "");   \
   TrackerTest::insert_tracker(&tracker_list, group, name);
 
 #define TEST_TRACKER_IS_BUSY(tracker, state)            \
-  CPPUNIT_ASSERT(state == '0' ||  tracker.is_busy());   \
-  CPPUNIT_ASSERT(state == '1' || !tracker.is_busy());
+  CPPUNIT_ASSERT(state == '0' ||  tracker.is_requesting());   \
+  CPPUNIT_ASSERT(state == '1' || !tracker.is_requesting());
 
 #define TEST_MULTI3_IS_BUSY(original, rearranged)           \
   TEST_TRACKER_IS_BUSY(tracker_0_0, original[0]);           \

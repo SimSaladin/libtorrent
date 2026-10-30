@@ -1,6 +1,7 @@
 #ifndef LIBTORRENT_NET_CURL_STACK_H
 #define LIBTORRENT_NET_CURL_STACK_H
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -9,21 +10,19 @@
 #include <vector>
 #include <curl/curl.h>
 
-#include "torrent/utils/scheduler.h"
+#include "torrent/system/scheduler.h"
 
 namespace torrent::net {
 
 class CurlGet;
 class CurlSocket;
 
-// Since std::hardware_destructive_interference_size only got added in gcc 12.1
-
-class alignas(LT_SMP_CACHE_BYTES) CurlStack : private std::vector<std::shared_ptr<CurlGet>> {
+class align_cacheline CurlStack : private std::vector<std::shared_ptr<CurlGet>> {
 public:
   using base_type       = std::vector<std::shared_ptr<CurlGet>>;
-  using socket_map_type = std::map<curl_socket_t, std::unique_ptr<CurlSocket>>;
+  using socket_map_type = std::map<curl_socket_t, std::shared_ptr<CurlSocket>>;
 
-  CurlStack(utils::Thread* thread);
+  CurlStack(system::Thread* thread);
   ~CurlStack();
 
   bool                is_running() const;
@@ -57,13 +56,16 @@ public:
   void                set_dns_timeout(long timeout);
 
   void                shutdown();
+  void                clear_requests();
 
   void                start_get(const std::shared_ptr<CurlGet>& curl_get);
   void                close_get(const std::shared_ptr<CurlGet>& curl_get);
 
   bool                process_done_handle();
 
-  utils::Thread*      thread() const                         { return m_thread; }
+  void                ensure_timeout_scheduled();
+
+  system::Thread*     thread() const                         { return m_thread; }
 
 protected:
   friend class CurlGet;
@@ -89,13 +91,18 @@ private:
 
   // Unprotected members (including base_type vector), only changed in ways that are implicitly
   // thread-safe. E.g. before any threads are started or only within the owning thread.
-  utils::Thread*        m_thread{};
-  CURLM*                m_handle{};
-  utils::SchedulerEntry m_task_timeout;
+  system::Thread*        m_thread{};
+  CURLM*                 m_handle{};
+  system::SchedulerEntry m_task_timeout;
 
-  socket_map_type     m_socket_map;
+  socket_map_type       m_socket_map;
 
-  mutable std::mutex  m_mutex;
+  align_cacheline
+
+  mutable std::mutex m_mutex;
+
+  // Mirrors base::size()
+  std::atomic_size_t  m_size{0};
 
   // Use lock guard when accessing these members, and when modifying the underlying vector.
   bool                m_running{true};
@@ -122,8 +129,7 @@ CurlStack::is_running() const {
 
 inline unsigned int
 CurlStack::size() const {
-  auto guard = lock_guard();
-  return base_type::size();
+  return m_size;
 }
 
 inline unsigned int

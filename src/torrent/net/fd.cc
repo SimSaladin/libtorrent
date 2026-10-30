@@ -1,58 +1,115 @@
 #include "config.h"
 
+#if defined(__linux__)
+#  include <string.h>
+#  include <net/if.h>
+#elif defined(__APPLE__)
+#  define __APPLE_USE_RFC_3542
+#  include <net/if.h>
+#  include <netinet/in.h>
+#endif
+
 #include "fd.h"
 
+#include <charconv>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "torrent/exceptions.h"
 #include "torrent/net/socket_address.h"
+#include "torrent/system/types.h"
 #include "torrent/utils/log.h"
+
+#if defined(USE_EPOLL)
+#include <sys/epoll.h>
+#elif defined(USE_KQUEUE)
+#include <sys/time.h>
+#include <sys/event.h>
+#else
+#error "Must enable at least one of either kqueue or epoll"
+#endif
+
+#ifdef USE_INOTIFY
+#include <sys/inotify.h>
+#endif
 
 #define LT_LOG(log_fmt, ...)                                    \
   lt_log_print(LOG_CONNECTION_FD, "fd: " log_fmt, __VA_ARGS__);
 #define LT_LOG_FLAG(log_fmt)                                            \
   lt_log_print(LOG_CONNECTION_FD, "fd: " log_fmt " : flags:0x%x", flags);
 #define LT_LOG_FLAG_ERROR(log_fmt)                                      \
-  lt_log_print(LOG_CONNECTION_FD, "fd: " log_fmt " : flags:0x%x errno:%i message:'%s'", \
-               flags, errno, std::strerror(errno));
-#define LT_LOG_FD(log_fmt)                                      \
+  lt_log_print(LOG_CONNECTION_FD, "fd: " log_fmt " : flags:0x%x errno:%s", \
+               flags, system::errno_enum(errno));
+#define LT_LOG_FD(log_fmt)                                  \
   lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt, fd);
 #define LT_LOG_FD_ERROR(log_fmt)                                        \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : errno:%i message:'%s'", \
-               fd, errno, std::strerror(errno));
-#define LT_LOG_FD_SOCKADDR(log_fmt)                                   \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s", \
+  { int err = errno;                                                    \
+    lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : errno:%s",   \
+                 fd, system::errno_enum(errno));                        \
+    errno = err; }
+#define LT_LOG_FD_SOCKADDR(log_fmt)                                     \
+  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s",   \
                fd, sa_pretty_str(sa).c_str());
+#define LT_LOG_FD_SOCKADDR_MSG(log_fmt, msg)                            \
+  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s %s", \
+               fd, sa_pretty_str(sa).c_str(), msg);
+
 #define LT_LOG_FD_SOCKADDR_ERROR(log_fmt)                               \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s errno:%i message:'%s'", \
-               fd, sa_pretty_str(sa).c_str(), errno, std::strerror(errno));
-#define LT_LOG_FD_SAP(log_fmt)                                        \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s", \
+  { int err = errno;                                                    \
+    lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s errno:%s", \
+                 fd, sa_pretty_str(sa).c_str(), system::errno_enum(errno)); \
+    errno = err; }
+
+#define LT_LOG_FD_SAP(log_fmt)                                          \
+  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : address:%s",   \
                fd, sap_pretty_str(sap).c_str());
 #define LT_LOG_FD_FLAG(log_fmt)                                         \
   lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : flags:0x%x", fd, flags);
 #define LT_LOG_FD_FLAG_ERROR(log_fmt)                                   \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : flags:0x%x errno:%i message:'%s'", \
-               fd, flags, errno, std::strerror(errno));
+  { int err = errno;                                                    \
+    lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : flags:0x%x errno:%s", \
+                 fd, flags, system::errno_enum(errno));                 \
+    errno = err; }
 #define LT_LOG_FD_VALUE(log_fmt, value)                                 \
   lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : value:%i", fd, (int)value);
 #define LT_LOG_FD_VALUE_ERROR(log_fmt, value)                           \
-  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : value:%i errno:%i message:'%s'", \
-               fd, (int)value, errno, std::strerror(errno));
+  { int err = errno;                                                    \
+    lt_log_print(LOG_CONNECTION_FD, "fd->%i: " log_fmt " : value:%i errno:%s", \
+                 fd, (int)value, system::errno_enum(errno));            \
+    errno = err; }
+
+#define LT_LOG_FD_DEVICE(msg)                                           \
+  lt_log_print(LOG_CONNECTION_FD, "fd->%i: " msg " : device:%s", fd, device);
+#define LT_LOG_FD_DEVICE_ERROR(msg)                                     \
+  { int err = errno;                                                    \
+    lt_log_print(LOG_CONNECTION_FD, "fd->%i: " msg " : device:%s errno:%s", fd, device, system::errno_enum(errno)); \
+    errno = err; }
+
 
 namespace torrent {
 
-int fd__accept(int socket, sockaddr *address, socklen_t *address_len) { return ::accept(socket, address, address_len); }
+int fd__accept(int socket, sockaddr *address, socklen_t *address_len) {
+#ifdef HAVE_ACCEPT4
+  return ::accept4(socket, address, address_len, SOCK_CLOEXEC);
+#else
+  return ::accept(socket, address, address_len);
+#endif
+}
 int fd__bind(int socket, const sockaddr *address, socklen_t address_len) { return ::bind(socket, address, address_len); }
 int fd__close(int fildes) { return ::close(fildes); }
 int fd__connect(int socket, const sockaddr *address, socklen_t address_len) { return ::connect(socket, address, address_len); }
 int fd__fcntl_int(int fildes, int cmd, int arg) { return ::fcntl(fildes, cmd, arg); }
 int fd__listen(int socket, int backlog) { return ::listen(socket, backlog); }
 int fd__setsockopt_int(int socket, int level, int option_name, int option_value) { return ::setsockopt(socket, level, option_name, &option_value, sizeof(int)); }
-int fd__socket(int domain, int type, int protocol) { return ::socket(domain, type, protocol); }
+int fd__socket(int domain, int type, int protocol) {
+#ifdef SOCK_CLOEXEC
+  type |= SOCK_CLOEXEC;
+#endif
+  return ::socket(domain, type, protocol);
+}
 
 int
 fd_open(fd_flags flags) {
@@ -81,7 +138,7 @@ fd_open(fd_flags flags) {
     fd = fd__socket(PF_INET6, domain, protocol);
   }
 
-  if (fd == -1 && !(flags & fd_flag_v6only)) {
+  if (fd == -1 && !(flags & (fd_flag_v6 | fd_flag_v6only))) {
     LT_LOG_FLAG("fd_open opening ipv4 socket");
     fd = fd__socket(PF_INET, domain, protocol);
   }
@@ -123,6 +180,8 @@ fd_open_family(fd_flags flags, int family) {
 
   if (family == AF_INET)
     flags |= fd_flag_v4;
+  else
+    flags |= fd_flag_v6;
 
   return fd_open(flags);
 }
@@ -158,12 +217,31 @@ fd_open_local(fd_flags flags) {
   return fd;
 }
 
+int
+fd_open_file(const std::string& path, int flags, mode_t mode) {
+  int fd = ::open(path.c_str(), flags | O_CLOEXEC, mode);
+
+  if (fd == -1) {
+    LT_LOG_FLAG_ERROR("fd_open_file failed to open file");
+    return -1;
+  }
+
+  LT_LOG_FD_FLAG("fd_open_file succeeded");
+  return fd;
+}
+
 void
 fd_open_pipe(int& fd1, int& fd2) {
   int result[2];
 
-  if (pipe(result) == -1)
-    throw internal_error("torrent::fd_open_pipe failed: " + std::string(strerror(errno)));
+#ifdef HAVE_PIPE2
+  int status = pipe2(result, O_CLOEXEC);
+#else
+  int status = pipe(result);
+#endif
+
+  if (status == -1)
+    throw internal_error("torrent::fd_open_pipe failed: " + system::errno_enum_str(errno));
 
   fd1 = result[0];
   fd2 = result[1];
@@ -174,14 +252,76 @@ fd_open_pipe(int& fd1, int& fd2) {
 void
 fd_open_socket_pair(int& fd1, int& fd2) {
   int result[2];
+  int type = SOCK_STREAM;
 
-  if (socketpair(AF_LOCAL, SOCK_STREAM, 0, result) == -1)
-    throw internal_error("torrent::fd_open_socket_pair failed: " + std::string(strerror(errno)));
+#ifdef SOCK_CLOEXEC
+  type |= SOCK_CLOEXEC;
+#endif
+
+  if (socketpair(AF_LOCAL, type, 0, result) == -1)
+    throw internal_error("torrent::fd_open_socket_pair failed: " + system::errno_enum_str(errno));
 
   fd1 = result[0];
   fd2 = result[1];
 
   LT_LOG("fd_open_socket_pair succeeded : fd1:%i fd2:%i", fd1, fd2);
+}
+
+int
+fd_open_epoll([[maybe_unused]] int size) {
+#ifdef USE_EPOLL
+#ifdef HAVE_EPOLL_CREATE1
+  int fd = epoll_create1(EPOLL_CLOEXEC);
+#else
+  int fd = epoll_create(size);
+#endif
+
+  if (fd == -1)
+    throw internal_error("torrent::fd_open_epoll failed: " + system::errno_enum_str(errno));
+
+  return fd;
+
+#else
+  throw internal_error("torrent::fd_open_epoll called but epoll support is not compiled in");
+#endif
+}
+
+int
+fd_open_kqueue() {
+#ifdef USE_KQUEUE
+#ifdef HAVE_KQUEUE1
+  int fd = kqueue1(O_CLOEXEC);
+#else
+  int fd = kqueue();
+#endif
+
+  if (fd == -1)
+    throw internal_error("torrent::fd_open_kqueue failed: " + system::errno_enum_str(errno));
+
+  return fd;
+
+#else
+  throw internal_error("torrent::fd_open_kqueue called but kqueue support is not compiled in");
+#endif
+}
+
+int
+fd_open_inotify() {
+#ifdef USE_INOTIFY
+#ifdef HAVE_INOTIFY_INIT1
+  int fd = inotify_init1(IN_CLOEXEC);
+#else
+  int fd = inotify_init();
+#endif
+
+  if (fd == -1)
+    throw internal_error("torrent::fd_open_inotify failed: " + system::errno_enum_str(errno));
+
+  return fd;
+
+#else
+  throw internal_error("torrent::fd_open_inotify called but inotify support is not compiled in");
+#endif
 }
 
 void
@@ -190,9 +330,24 @@ fd_close(int fd) {
     throw internal_error("torrent::fd_close: tried to close stdin/out/err");
 
   if (fd__close(fd) == -1)
-    throw internal_error("torrent::fd_close: " + std::string(strerror(errno)));
+    throw internal_error("torrent::fd_close: " + system::errno_enum_str(errno));
 
   LT_LOG_FD("fd_close succeeded");
+}
+
+void
+fd_close_and_clear(int& fd) {
+  fd_close(fd);
+  fd = -1;
+}
+
+void
+fd_close_and_clear_if_open(int& fd) {
+  if (fd == -1)
+    return;
+
+  fd_close(fd);
+  fd = -1;
 }
 
 int
@@ -245,6 +400,83 @@ fd_bind_with_length(int fd, const sockaddr* sa, socklen_t length) {
   }
 
   LT_LOG_FD_SOCKADDR("fd_bind() succeeded");
+  return true;
+}
+
+bool
+fd_bind_to_device(int fd, const char* device, [[maybe_unused]] int family) {
+  if (device == nullptr || *device == '\0') {
+    LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed : device string is empty");
+    return false;
+  }
+
+#if defined(__linux__)
+  if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, device, strnlen(device, IFNAMSIZ)) == -1) {
+    LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to bind socket to device");
+    return false;
+  }
+
+#elif defined(__APPLE__)
+  unsigned int ifindex = if_nametoindex(device);
+
+  if (ifindex == 0) {
+    LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to get ifindex for device");
+    return false;
+  }
+
+  int enforce = 1;
+
+  switch (family) {
+  case AF_INET:
+    if (setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &ifindex, sizeof(ifindex)) != 0) {
+      LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to bind ipv4 socket to device");
+      return false;
+    }
+
+    if (setsockopt(fd, IPPROTO_IP, IP_RECVIF, &enforce, sizeof(enforce)) != 0 &&
+        errno != ENOPROTOOPT && errno != EINVAL) {
+      LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to set IP_RECVIF for ipv4 socket");
+      return false;
+    }
+
+    break;
+  case AF_INET6:
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &ifindex, sizeof(ifindex)) != 0) {
+      LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to bind ipv6 socket to device");
+      return false;
+    }
+
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &enforce, sizeof(enforce)) != 0 &&
+        errno != ENOPROTOOPT && errno != EINVAL) {
+      LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to set IPV6_RECVPKTINFO for ipv6 socket");
+      return false;
+    }
+
+    break;
+  default:
+    throw internal_error("fd_bind_to_device() invalid family specified for macOS binding");
+  }
+
+#elif defined(__OpenBSD__)
+  int rtable_id{};
+  auto [ptr, ec] = std::from_chars(device, device + std::strlen(device), rtable_id);
+
+  if (ec != std::errc{} || *ptr != '\0') {
+    LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed as OpenBSD expects a numeric routing table ID for device configuration.");
+    return false;
+  }
+
+  if (setsockopt(fd, SOL_SOCKET, SO_RTABLE, &rtable_id, sizeof(rtable_id)) == -1) {
+    LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() failed to set SO_RTABLE");
+    return false;
+  }
+
+#else
+  LT_LOG_FD_DEVICE_ERROR("fd_bind_to_device() is not supported on this platform.");
+  return false;
+#endif
+
+  LT_LOG_FD_DEVICE("fd_bind_to_device() succeeded");
   return true;
 }
 
@@ -314,23 +546,19 @@ fd_listen(int fd, int backlog) {
   return true;
 }
 
-c_sa_unique_ptr
-fd_get_peer_name(int fd) {
-  sa_inet_union sau{};
-  sockaddr*     sa         = &sau.sa;
-  socklen_t     sau_length = sizeof(sockaddr_in6);
+bool
+fd_get_nonblock(int fd, bool* value) {
+  int flags = fd__fcntl_int(fd, F_GETFL, 0);
 
-  if (getpeername(fd, sa, &sau_length) == -1) {
-    LT_LOG_FD_ERROR("fd_get_peer_name() failed");
-    return nullptr;
-  }
-  if (sau_length < sa_length(sa)) {
-    LT_LOG_FD_ERROR("fd_get_peer_name() returned invalid length");
-    return nullptr;
+  if (flags == -1) {
+    LT_LOG_FD_ERROR("fd_get_nonblock() failed");
+    return false;
   }
 
-  LT_LOG_FD_SOCKADDR("fd_get_peer_name() succeeded");
-  return sa_copy(sa);
+  *value = (flags & O_NONBLOCK) != 0;
+
+  LT_LOG_FD_VALUE("fd_get_nonblock() succeeded", *value);
+  return true;
 }
 
 bool
@@ -346,25 +574,6 @@ fd_get_socket_error(int fd, int* value) {
   return true;
 }
 
-c_sa_unique_ptr
-fd_get_socket_name(int fd) {
-  sa_inet_union sau{};
-  sockaddr*     sa         = &sau.sa;
-  socklen_t     sau_length = sizeof(sockaddr_in6);
-
-  if (getsockname(fd, sa, &sau_length) == -1) {
-    LT_LOG_FD_ERROR("fd_get_socket_name() failed");
-    return nullptr;
-  }
-  if (sau_length < sa_length(sa)) {
-    LT_LOG_FD_ERROR("fd_get_socket_name() returned invalid length");
-    return nullptr;
-  }
-
-  LT_LOG_FD_SOCKADDR("fd_get_socket_name() succeeded");
-  return sa_copy(sa);
-}
-
 bool
 fd_get_type(int fd, int* value) {
   socklen_t length = sizeof(int);
@@ -376,6 +585,58 @@ fd_get_type(int fd, int* value) {
 
   LT_LOG_FD_VALUE("fd_get_type() succeeded", *value);
   return true;
+}
+
+c_sa_unique_ptr
+fd_get_peer_name(int fd) {
+  sockaddr_un sa_un{};
+  sockaddr*   sa         = reinterpret_cast<sockaddr*>(&sa_un);
+  socklen_t   sau_length = sizeof(sockaddr_un);
+
+  if (getpeername(fd, sa, &sau_length) == -1) {
+    LT_LOG_FD_ERROR("fd_get_peer_name() failed");
+    return nullptr;
+  }
+
+  if (sau_length > sizeof(sockaddr_un)) {
+    LT_LOG_FD("fd_get_peer_name() length exceeds buffer size");
+    errno = EOVERFLOW;
+    return nullptr;
+  }
+
+  if (sa->sa_family == AF_UNIX) {
+    LT_LOG_FD_SOCKADDR("fd_get_peer_name() succeeded");
+    return sa_unique_ptr(reinterpret_cast<sockaddr*>(new sockaddr_un(sa_un)));
+  }
+
+  LT_LOG_FD_SOCKADDR("fd_get_peer_name() succeeded");
+  return sa_copy(sa);
+}
+
+c_sa_unique_ptr
+fd_get_socket_name(int fd) {
+  sockaddr_un sa_un{};
+  sockaddr*   sa         = reinterpret_cast<sockaddr*>(&sa_un);
+  socklen_t   sau_length = sizeof(sockaddr_un);
+
+  if (getsockname(fd, sa, &sau_length) == -1) {
+    LT_LOG_FD_ERROR("fd_get_socket_name() failed");
+    return nullptr;
+  }
+
+  if (sau_length > sizeof(sockaddr_un)) {
+    LT_LOG_FD("fd_get_socket_name() length exceeds buffer size");
+    errno = EOVERFLOW;
+    return nullptr;
+  }
+
+  if (sa->sa_family == AF_UNIX) {
+    LT_LOG_FD_SOCKADDR("fd_get_socket_name() succeeded");
+    return sa_unique_ptr(reinterpret_cast<sockaddr*>(new sockaddr_un(sa_un)));
+  }
+
+  LT_LOG_FD_SOCKADDR("fd_get_socket_name() succeeded");
+  return sa_copy(sa);
 }
 
 bool

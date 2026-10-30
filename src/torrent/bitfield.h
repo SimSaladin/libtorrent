@@ -58,13 +58,16 @@ public:
 
   bool                get(size_type idx) const      { return m_data[idx / 8] & mask_at(idx % 8); }
 
+  // First set index in [first, last), or last if none.
+  size_type           find_first_set(size_type first, size_type last) const;
+
   void                set(size_type idx)            { m_set += !get(idx); m_data[idx / 8] |=  mask_at(idx % 8); }
   void                unset(size_type idx)          { m_set -=  get(idx); m_data[idx / 8] &= ~mask_at(idx % 8); }
 
   iterator            begin()                       { return m_data.get(); }
   const_iterator      begin() const                 { return m_data.get(); }
-  iterator            end()                         { return m_data.get() + size_bytes(); }
-  const_iterator      end() const                   { return m_data.get() + size_bytes(); }
+  iterator            end()                         { return m_data != nullptr ? m_data.get() + size_bytes() : m_data.get(); }
+  const_iterator      end() const                   { return m_data != nullptr ? m_data.get() + size_bytes() : m_data.get(); }
 
   size_type           position(const_iterator itr) const  { return (itr - m_data.get()) * 8; }
 

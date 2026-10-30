@@ -9,7 +9,7 @@ DhtTracker::add_peer(uint32_t addr_n, uint16_t port) {
   if (port == 0)
     return;
 
-  SocketAddressCompact compact(addr_n, port);
+  SocketAddressCompact compact(addr_n, htons(port));
 
   unsigned int oldest = 0;
   uint32_t minSeen = ~uint32_t();
@@ -83,6 +83,14 @@ DhtTracker::prune(uint32_t maxAge) {
 
   if (m_peers.size() != m_lastSeen.size())
     throw internal_error("DhtTracker::prune did inconsistent peer pruning.");
+}
+
+uint32_t
+DhtTracker::last_seen() const {
+  if (m_lastSeen.empty())
+    return 0;
+
+  return *std::max_element(m_lastSeen.begin(), m_lastSeen.end());
 }
 
 } // namespace torrent

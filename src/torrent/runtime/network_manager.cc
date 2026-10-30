@@ -2,31 +2,31 @@
 
 #include "torrent/runtime/network_manager.h"
 
+#include <cassert>
+
 #include "net/listen.h"
 #include "torrent/exceptions.h"
-#include "torrent/net/network_config.h"
+#include "torrent/runtime/client_config.h"
+#include "torrent/runtime/network_config.h"
+#include "torrent/runtime/runtime.h"
+#include "torrent/system/thread.h"
 #include "torrent/tracker/dht_controller.h"
 #include "torrent/utils/log.h"
-#include "torrent/utils/thread.h"
 
 // TODO: Add runtime category and add it to important/complete log outputs.
 
-#define LT_LOG_NOTICE(log_fmt, ...)                                     \
-  lt_log_print_subsystem(LOG_NOTICE, "runtime::network_manager", log_fmt, __VA_ARGS__);
+#define LT_LOG_ERROR(log_fmt, ...)                                     \
+  lt_log_print(LOG_ERRORS, "runtime::network_manager : " log_fmt, __VA_ARGS__);
 
 namespace torrent::runtime {
 
-NetworkManager::NetworkManager(utils::Thread* main_thread)
-  : m_main_thread(main_thread),
-
-    m_listen_inet(new Listen),
+NetworkManager::NetworkManager()
+  : m_listen_inet(new Listen),
     m_listen_inet6(new Listen),
     m_dht_controller(new tracker::DhtController) {
 }
 
-NetworkManager::~NetworkManager() {
-  m_main_thread->cancel_callback_and_wait(this);
-}
+NetworkManager::~NetworkManager() = default;
 
 bool
 NetworkManager::is_listening() const {
@@ -61,10 +61,8 @@ NetworkManager::cleanup() {
   listen_close_unsafe();
 }
 
-// TODO: Currently only opens one listen socket, either ipv4 or ipv6 based on bind address.
 // TODO: Log here
 // TODO: Verify various combinations of addresses/block_ipv4in6 match tcp46/udp46 sockets
-
 // TODO: Fix DHT
 
 bool
@@ -77,8 +75,12 @@ void
 NetworkManager::listen_close() {
   auto guard = lock_guard();
   listen_close_unsafe();
+}
 
-  // m_dht_controller->stop();
+void
+NetworkManager::listen_restart() {
+  auto guard = lock_guard();
+  listen_restart_unsafe();
 }
 
 uint16_t
@@ -97,10 +99,62 @@ NetworkManager::listen_port_or_throw() const {
   return m_listen_port;
 }
 
+void
+NetworkManager::set_listen_port(uint16_t port) {
+  assert(std::this_thread::get_id() == main_thread::thread_id());
+
+  {
+    auto guard = lock_guard();
+
+    if (port == 0)
+      throw input_error("Invalid listen port number, zero is not allowed.");
+
+    if (port == m_listen_port)
+      return;
+
+    m_listen_port = port;
+
+    listen_restart_unsafe();
+
+    client_config()->set_listen_port_range(port, port);
+  }
+
+  if (runtime::network_config()->override_dht_port() == 0)
+    dht_restart();
+}
+
+void
+NetworkManager::dht_restart() {
+  assert(std::this_thread::get_id() == main_thread::thread_id());
+
+  if (!runtime::network_manager()->dht_controller()->is_active())
+    return;
+
+  try {
+    runtime::network_manager()->dht_controller()->stop();
+    runtime::network_manager()->dht_controller()->start();
+
+  } catch (const base_error& e) {
+    LT_LOG_ERROR("Could not restart DHT server: %" PRIu16 " : %s", dht_port(), e.what());
+    return;
+  }
+}
+
 uint16_t
 NetworkManager::dht_port() {
   // auto guard = lock_guard();
   return m_dht_controller->port();
+}
+
+void
+NetworkManager::set_dht_port(uint16_t port) {
+  if (port == runtime::network_config()->override_dht_port())
+    return;
+
+  runtime::network_config()->set_override_dht_port(port);
+
+  if (port != 0)
+    dht_restart();
 }
 
 // TODO: Make bootstrap nodes explicit, and when we add them also try adding as node if we're
@@ -115,10 +169,11 @@ NetworkManager::dht_add_bootstrap_node(std::string host, int port){
 }
 
 void
-NetworkManager::dht_add_peer_node([[maybe_unused]] const sockaddr* sa, [[maybe_unused]] int port) {
-  // Ignore peer nodes as we shouldn't need them(?)
-  //
-  // Re-enable this if it causes issues.
+NetworkManager::dht_add_peer_node(const sockaddr* sa, int port) {
+  if (m_dht_controller->is_nodes_populated())
+    return;
+
+  m_dht_controller->add_node(sa, port);
 }
 
 bool
@@ -126,34 +181,42 @@ NetworkManager::is_listening_unsafe() const {
   return m_listen_inet->is_open() || m_listen_inet6->is_open();
 }
 
-void
-NetworkManager::restart_listen() {
-  auto guard = lock_guard();
-
-  if (m_listen_restarting || !is_listening_unsafe())
-    return;
-
-  m_listen_restarting = true;
-
-  m_main_thread->callback(this, [this]() { perform_restart_listen(); });
-}
-
 bool
-NetworkManager::listen_open_unsafe(uint16_t begin, uint16_t end) {
-  auto config_guard = config::network_config()->lock_guard();
-  auto backlog      = config::network_config()->listen_backlog_unsafe();
+NetworkManager::listen_open_unsafe(uint16_t first, uint16_t last) {
+  assert(std::this_thread::get_id() == main_thread::thread_id());
 
   if (m_listen_inet->is_open() || m_listen_inet6->is_open())
     throw internal_error("NetworkManager::open_listen(): Tried to open listen socket when one is already open.");
 
-  auto [inet_address, inet6_address, block_ipv4in6] = config::network_config()->listen_addresses_unsafe();
+  Listen::open_options options = {
+    .first_port = first,
+    .last_port  = last,
+  };
+
+  NetworkConfig::listen_addresses listen_addresses;
+
+  {
+    auto nw_config    = runtime::network_config();
+    auto config_guard = nw_config->lock_guard();
+
+    options.backlog  = nw_config->listen_backlog_unsafe();
+    listen_addresses = nw_config->listen_addresses_unsafe();
+
+    if (first != last && nw_config->override_dht_port_unsafe() == 0)
+      options.check_dht = true;
+  }
+
+  auto [inet_address, inet_device_name, inet6_address, inet6_device_name, block_ipv4in6] = listen_addresses;
+
+  options.block_ipv4in6 = block_ipv4in6;
 
   if (inet_address == nullptr && inet6_address == nullptr)
     throw input_error("Neither IPv4 nor IPv6 listen address are suitable for opening listen sockets, check block_ipv4 and block_ipv6 settings.");
 
   if (inet_address != nullptr && inet6_address != nullptr) {
-    if (!Listen::open_both(m_listen_inet.get(), m_listen_inet6.get(), inet_address.get(), inet6_address.get(),
-                           begin, end, backlog, block_ipv4in6))
+    if (!Listen::open_both({m_listen_inet.get(), inet_address.get(), inet_device_name},
+                           {m_listen_inet6.get(), inet6_address.get(), inet6_device_name},
+                           options))
       return false;
 
     m_listen_port = m_listen_inet->port();
@@ -161,7 +224,7 @@ NetworkManager::listen_open_unsafe(uint16_t begin, uint16_t end) {
   }
 
   if (inet_address != nullptr) {
-    if (!Listen::open_single(m_listen_inet.get(), inet_address.get(), begin, end, backlog, false))
+    if (!Listen::open_single({m_listen_inet.get(), inet_address.get(), inet_device_name}, options))
       return false;
 
     m_listen_port = m_listen_inet->port();
@@ -169,7 +232,7 @@ NetworkManager::listen_open_unsafe(uint16_t begin, uint16_t end) {
   }
 
   if (inet6_address != nullptr) {
-    if (!Listen::open_single(m_listen_inet6.get(), inet6_address.get(), begin, end, backlog, block_ipv4in6))
+    if (!Listen::open_single({m_listen_inet6.get(), inet6_address.get(), inet6_device_name}, options))
       return false;
 
     m_listen_port = m_listen_inet6->port();
@@ -181,27 +244,31 @@ NetworkManager::listen_open_unsafe(uint16_t begin, uint16_t end) {
 
 void
 NetworkManager::listen_close_unsafe() {
+  assert(std::this_thread::get_id() == main_thread::thread_id());
+
   m_listen_inet->close();
   m_listen_inet6->close();
 }
 
 void
-NetworkManager::perform_restart_listen() {
-  auto guard = lock_guard();
-
-  m_listen_restarting = false;
-
-  if (!is_listening_unsafe())
-    return;
-
-  // TODO: Move DHT here and restart.
+NetworkManager::listen_restart_unsafe() {
+  assert(std::this_thread::get_id() == main_thread::thread_id());
 
   listen_close_unsafe();
 
+  // TODO: If listen port was always 0, we need to properly open it using port range/randomizing.
+  if (m_listen_port == 0)
+    return;
+
+  if (!is_network_initialized() || network_config()->is_block_incoming())
+    return;
+
   try {
     listen_open_unsafe(m_listen_port, m_listen_port);
+
   } catch (const base_error& e) {
-    LT_LOG_NOTICE("could not restart listen socket: %s", e.what());
+    LT_LOG_ERROR("Could not restart listen socket: %" PRIu16 " : %s", m_listen_port, e.what());
+    return;
   }
 }
 

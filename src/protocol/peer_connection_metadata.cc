@@ -5,21 +5,19 @@
 #include <cstring>
 #include <sstream>
 
-#include "download/chunk_selector.h"
-#include "download/chunk_statistics.h"
 #include "download/download_main.h"
-#include "manager.h"
 #include "protocol/extensions.h"
-#include "torrent/download/choke_queue.h"
 #include "torrent/download_info.h"
 #include "torrent/peer/connection_list.h"
 #include "torrent/peer/peer_info.h"
 #include "torrent/utils/log.h"
 
+#include "torrent/runtime/runtime.h"
+
 #define LT_LOG_METADATA_EVENTS(log_fmt, ...)                            \
-  lt_log_print_info(LOG_PROTOCOL_METADATA_EVENTS, this->download()->info(), "metadata_events", "%40s " log_fmt, this->peer_info()->id_hex(), __VA_ARGS__);
+  lt_log_print_info(LOG_PROTOCOL_METADATA_EVENTS, this->download()->info(), "%40.40s : metadata_events : " log_fmt, this->peer_info()->id_hex(), __VA_ARGS__);
 #define LT_LOG_STORAGE_ERRORS(log_fmt, ...)                              \
-  lt_log_print_info(LOG_PROTOCOL_STORAGE_ERRORS, this->download()->info(), "storage_errors", "%40s " log_fmt, this->peer_info()->id_hex(), __VA_ARGS__);
+  lt_log_print_hash(LOG_PROTOCOL_STORAGE_ERRORS, this->download()->info()->hash(), "storage_errors : peer:%40.40s " log_fmt, this->peer_info()->id_hex(), __VA_ARGS__);
 
 namespace torrent {
 
@@ -187,19 +185,14 @@ PeerConnectionMetadata::event_read() {
 
   try {
 
-    // Normal read.
-    //
-    // We rarely will read zero bytes as the read of 64 bytes will
-    // almost always either not fill up or it will require additional
-    // reads.
-    //
-    // Only loop when end hits 64.
+    // Normal read: fill the full protocol buffer; loop while it is full
+    // (socket may still have data).
 
     do {
       switch (m_down->get_state()) {
       case ProtocolRead::IDLE:
-        if (m_down->buffer()->size_end() < read_size) {
-          unsigned int length = read_stream_throws(m_down->buffer()->end(), read_size - m_down->buffer()->size_end());
+        if (m_down->buffer()->size_end() < ProtocolRead::buffer_size) {
+          unsigned int length = read_stream_throws(m_down->buffer()->end(), ProtocolRead::buffer_size - m_down->buffer()->size_end());
           m_down->throttle()->node_used_unthrottled(length);
 
           if (is_encrypted())
@@ -211,7 +204,7 @@ PeerConnectionMetadata::event_read() {
         while (read_message())
           ; // Do nothing.
 
-        if (m_down->buffer()->size_end() == read_size) {
+        if (m_down->buffer()->size_end() == ProtocolRead::buffer_size) {
           m_down->buffer()->move_unused();
           break;
         } else {
@@ -267,7 +260,7 @@ PeerConnectionMetadata::event_read() {
 
   } catch (const base_error& e) {
     std::stringstream s;
-    s << "Connection read fd(" << m_fileDesc << ',' << m_down->get_state() << ',' << m_down->last_command() << ") \"" << e.what() << '"';
+    s << "Connection read fd(" << file_descriptor() << ',' << m_down->get_state() << ',' << m_down->last_command() << ") \"" << e.what() << '"';
 
     throw internal_error(s.str());
   }
@@ -280,7 +273,7 @@ PeerConnectionMetadata::fill_write_buffer() {
   if (m_tryRequest)
     m_tryRequest = try_request_metadata_pieces();
 
-  if (m_sendPEXMask && m_up->can_write_extension() &&
+  if (m_send_pex_mask && m_up->can_write_extension() &&
       send_pex_message()) {
     // Don't do anything else if send_pex_message() succeeded.
 
@@ -355,7 +348,7 @@ PeerConnectionMetadata::event_write() {
 
   } catch (const base_error& e) {
     std::stringstream s;
-    s << "Connection write fd(" << m_fileDesc << ',' << m_up->get_state() << ',' << m_up->last_command() << ") \"" << e.what() << '"';
+    s << "Connection write fd(" << file_descriptor() << ',' << m_up->get_state() << ',' << m_up->last_command() << ") \"" << e.what() << '"';
 
     throw internal_error(s.str());
   }
@@ -387,9 +380,9 @@ PeerConnectionMetadata::try_request_metadata_pieces() {
     return false;
 
   if (request_list()->queued_empty())
-    m_downStall = 0;
+    m_down_stall = 0;
 
-  uint32_t pipeSize = request_list()->calculate_pipe_size(m_peerChunks.download_throttle()->rate()->rate());
+  uint32_t pipeSize = request_list()->calculate_pipe_size(m_peer_chunks.download_throttle()->rate()->rate(), m_extensions->peer_request_queue());
 
   // Don't start requesting if we can't do it in large enough chunks.
   if (request_list()->pipe_size() >= (pipeSize + 10) / 2)
@@ -407,7 +400,7 @@ PeerConnectionMetadata::try_request_metadata_pieces() {
 
   const Piece* p = pieces.front();
 
-  if (!m_download->file_list()->is_valid_piece(*p) || !m_peerChunks.bitfield()->get(p->index()))
+  if (!m_download->file_list()->is_valid_piece(*p) || !m_peer_chunks.bitfield()->get(p->index()))
     throw internal_error("PeerConnectionMetadata::try_request_metadata_pieces() tried to use an invalid piece.");
 
   // DEBUG:
@@ -424,10 +417,7 @@ void
 PeerConnectionMetadata::receive_metadata_piece(uint32_t piece, const char* data, uint32_t length) {
   if (data == NULL) {
     // Length is not set in a reject message.
-    length = ProtocolExtension::metadata_piece_size;
-
-    if ((piece << ProtocolExtension::metadata_piece_shift) + ProtocolExtension::metadata_piece_size >= m_download->file_list()->size_bytes())
-      length = m_download->file_list()->chunk_size() % ProtocolExtension::metadata_piece_size;
+    length = ProtocolExtension::metadata_piece_length(piece, m_download->file_list()->size_bytes());
 
     m_tryRequest = false;
     read_cancel_piece(Piece(0, piece << ProtocolExtension::metadata_piece_shift, length));

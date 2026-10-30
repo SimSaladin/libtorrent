@@ -6,13 +6,20 @@
 #include <cassert>
 #include <fcntl.h>
 #include <limits>
+#include <unistd.h>
 
 #include "manager.h"
 #include "data/socket_file.h"
 #include "torrent/exceptions.h"
 #include "torrent/data/file.h"
+#include "torrent/utils/chrono.h"
+#include "utils/fd_close_queue.h"
 
 namespace torrent {
+
+FileManager::FileManager() {
+  m_fd_close_queue = std::make_unique<utils::FdCloseQueue>();
+}
 
 FileManager::~FileManager() {
   assert(empty() && "FileManager::~FileManager() called but empty() != true.");
@@ -25,27 +32,22 @@ FileManager::set_max_open_files(size_type s) {
 
   m_max_open_files = s;
 
-  while (size() > m_max_open_files)
-    close_least_active();
+  verify_max_open_or_evict(0);
 }
 
 bool
-FileManager::open(value_type file, [[maybe_unused]] bool hashing, int prot, int flags) {
+FileManager::open(File* file, [[maybe_unused]] bool hashing, int prot, int flags) {
   if (file->is_padding())
     return true;
 
   if (file->is_open())
     close(file);
 
-  if (size() > m_max_open_files)
-    throw internal_error("FileManager::open_file(...) m_openSize > m_max_open_files.");
-
-  if (size() == m_max_open_files)
-    close_least_active();
+  verify_max_open_or_evict(1);
 
   SocketFile fd;
 
-  if (!fd.open(file->frozen_path(), prot, flags)) {
+  if (!fd.open(file->frozen_path().str(), prot, flags)) {
     m_files_failed_counter++;
     return false;
   }
@@ -72,43 +74,215 @@ FileManager::open(value_type file, [[maybe_unused]] bool hashing, int prot, int 
 }
 
 void
-FileManager::close(value_type file) {
-  if (!file->is_open())
+FileManager::close(File* file) {
+  m_fd_close_queue->close_fd(detach(file));
+}
+
+// TODO: We need to store the iterator in File to optimize closing files.
+
+void
+FileManager::close_files(const std::vector<File*>& files) {
+  if (files.empty())
     return;
 
-  if (file->is_padding())
+  std::vector<int> closed_fds;
+  closed_fds.reserve(files.size());
+
+  for (auto* file : files) {
+    if (!file->is_open() || file->is_padding())
+      continue;
+
+    closed_fds.push_back(detach(file));
+  }
+
+  m_fd_close_queue->close_fds(std::move(closed_fds));
+}
+
+void
+FileManager::close_files(const std::vector<std::unique_ptr<File>>& files) {
+  if (files.empty())
     return;
 
-  SocketFile(file->file_descriptor()).close();
+  std::vector<int> closed_fds;
+  closed_fds.reserve(files.size());
 
-  file->set_protection(0);
-  file->set_file_descriptor(-1);
+  for (auto& file : files) {
+    if (!file->is_open() || file->is_padding())
+      continue;
+
+    closed_fds.push_back(detach(file.get()));
+  }
+
+  m_fd_close_queue->close_fds(std::move(closed_fds));
+}
+
+int
+FileManager::detach(File* file) {
+  assert(file->is_open() && !file->is_padding());
 
   auto itr = std::find(begin(), end(), file);
 
   if (itr == end())
-    throw internal_error("FileManager::close_file(...) itr == end().");
+    throw internal_error("FileManager::detach(...) itr == end().");
+
+  return detach(itr);
+}
+
+int
+FileManager::detach(iterator itr) {
+  auto* file = *itr;
+  int   fd   = file->file_descriptor();
+
+  file->set_protection(0);
+  file->reset_file_descriptor();
 
   *itr = back();
   base_type::pop_back();
 
+  std::erase_if(m_least_active_cache, [file](const auto& pair) {
+      return pair.first == file || pair.second != pair.first->last_touched();
+    });
+
   m_files_closed_counter++;
+  return fd;
 }
 
 void
-FileManager::close_least_active() {
-  File* least = nullptr;
-  uint64_t last = std::numeric_limits<int64_t>::max();
+FileManager::verify_max_open_or_evict(unsigned int reserve_count) {
+  if (reserve_count > m_max_open_files)
+    throw input_error("FileManager::verify_max_open_or_evict() reserve_count > max_open_files.");
 
-  for (auto f : *this) {
-    if (f->is_open() && f->last_touched() <= last) {
-      last = f->last_touched();
-      least = f;
+  if (size() + reserve_count > m_max_open_files) {
+    evict_least_active(size() + reserve_count - m_max_open_files);
+
+    if (size() + reserve_count > m_max_open_files)
+      throw internal_error("FileManager::verify_max_open_or_evict() failed to evict enough files.");
+  }
+
+  auto current_count = size() + reserve_count + m_fd_close_queue->size();
+
+  if (current_count > m_max_open_files)
+    m_fd_close_queue->wait_for(current_count - m_max_open_files);
+
+  if (size() + reserve_count > m_max_open_files)
+    throw internal_error("FileManager::verify_max_open_or_evict() failed to wait for enough files to close.");
+}
+
+std::vector<File*>
+FileManager::get_least_active(unsigned int count) {
+  if (count == 0)
+    return {};
+
+  std::vector<File*> files;
+  files.reserve(count);
+
+  for (auto* file : *this) {
+    if (files.size() == count) {
+      if (file->last_touched() >= files.back()->last_touched())
+        continue;
+
+      files.back() = file;
+    } else {
+      files.push_back(file);
+    }
+
+    for (auto itr = std::prev(files.end()); itr != files.begin(); --itr) {
+      if ((*itr)->last_touched() >= (*std::prev(itr))->last_touched())
+        break;
+
+      std::iter_swap(itr, std::prev(itr));
     }
   }
 
-  if (least)
-    close(least);
+  return files;
+}
+
+void
+FileManager::evict_least_active(unsigned int count) {
+  count = evict_least_active_from_cache(count);
+
+  if (count == 0)
+    return;
+
+  auto cache_size     = m_max_open_files / 16;
+  auto files_to_close = get_least_active(count + cache_size);
+
+  cache_type cache;
+
+  if (files_to_close.size() > count) {
+    cache.reserve(files_to_close.size() - count);
+
+    for (size_t i = count; i < files_to_close.size(); i++)
+      cache.emplace_back(files_to_close[i], files_to_close[i]->last_touched());
+  }
+
+  m_least_active_cache.clear();
+
+  if (files_to_close.size() > count)
+    files_to_close.resize(count);
+
+  close_files(files_to_close);
+
+  m_least_active_cache = std::move(cache);
+}
+
+unsigned int
+FileManager::evict_least_active_from_cache(unsigned int count) {
+  std::vector<File*> files;
+  files.reserve(count);
+
+  int idx = 0;
+
+  for (auto& pair : m_least_active_cache) {
+    if (count == 0)
+      break;
+
+    idx++;
+
+    if (pair.first->last_touched() != pair.second)
+      continue;
+
+    if (!pair.first->is_open())
+      continue;
+
+    assert(!pair.first->is_padding());
+
+    files.push_back(pair.first);
+    count--;
+  }
+
+  m_least_active_cache.erase(m_least_active_cache.begin(), m_least_active_cache.begin() + idx);
+
+  close_files(files);
+
+  return count;
+}
+
+void
+FileManager::periodic_close_idle() {
+  if (m_close_idle_timeout == 0s || empty())
+    return;
+
+  auto cached_seconds = this_thread::cached_seconds();
+
+  if (cached_seconds - m_close_idle_last_check < m_close_idle_timeout / 4)
+    return;
+
+  m_close_idle_last_check = cached_seconds;
+
+  std::vector<File*> files;
+
+  for (auto* file : *this) {
+    if (!file->is_open())
+      continue;
+
+    auto last_touched = utils::cast_seconds(file->last_touched_usec());
+
+    if (last_touched < cached_seconds && cached_seconds - last_touched > m_close_idle_timeout)
+      files.push_back(file);
+  }
+
+  close_files(files);
 }
 
 } // namespace torrent

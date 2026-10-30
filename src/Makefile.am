@@ -12,8 +12,8 @@ libtorrent_la_LIBADD = \
 libtorrent_la_SOURCES = \
 	manager.cc \
 	manager.h \
-	runtime.cc \
-	runtime.h \
+	runtime_manager.cc \
+	runtime_manager.h \
 	thread_main.cc \
 	thread_main.h
 
@@ -25,6 +25,8 @@ libtorrent_other_la_SOURCES = \
 	data/chunk_list.cc \
 	data/chunk_list.h \
 	data/chunk_list_node.h \
+	data/chunk_manager.cc \
+	data/chunk_manager.h \
 	data/chunk_part.cc \
 	data/chunk_part.h \
 	data/hash_check_queue.cc \
@@ -91,6 +93,8 @@ libtorrent_other_la_SOURCES = \
 	net/dns_cache.h \
 	net/dns_buffer.cc \
 	net/dns_buffer.h \
+	net/event_fd.cc \
+	net/event_fd.h \
 	net/listen.cc \
 	net/listen.h \
 	net/protocol_buffer.h \
@@ -110,10 +114,18 @@ libtorrent_other_la_SOURCES = \
 	net/udns_library.cc \
 	net/udns_library.h \
 	\
+	net/proxy/proxy.h \
+	net/proxy/proxy_http.cc \
+	net/proxy/proxy_http.h \
+	net/proxy/proxy_socks5.cc \
+	net/proxy/proxy_socks5.h \
+	\
 	net/udns/config.h \
 	net/udns/udns.h \
 	\
 	protocol/encryption_info.h \
+	protocol/encryption_policy.cc \
+	protocol/encryption_policy.h \
 	protocol/extensions.cc \
 	protocol/extensions.h \
 	protocol/handshake.cc \
@@ -151,17 +163,18 @@ libtorrent_other_la_SOURCES = \
 	tracker/tracker_udp.h \
 	tracker/tracker_worker.cc \
 	tracker/tracker_worker.h \
+	tracker/udp_router.cc \
+	tracker/udp_router.h \
 	\
 	utils/diffie_hellman.cc \
 	utils/diffie_hellman.h \
-	utils/functional.h \
+	utils/fd_close_queue.cc \
+	utils/fd_close_queue.h \
 	utils/instrumentation.cc \
 	utils/instrumentation.h \
 	utils/partial_queue.h \
 	utils/rc4.h \
 	utils/sha1.h \
-	utils/signal_interrupt.cc \
-	utils/signal_interrupt.h \
 	utils/thread_internal.h \
 	utils/queue_buckets.h
 

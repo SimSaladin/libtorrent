@@ -23,6 +23,11 @@ class PeerChunks;
 
 class ChunkSelector {
 public:
+  struct find_result {
+    uint32_t index;
+    bool     high;
+  };
+
   static constexpr auto invalid_chunk = ~uint32_t{0};
 
   ChunkSelector(download_data* data) : m_data(data) {}
@@ -45,9 +50,7 @@ public:
   // find.
   void                update_priorities();
 
-  uint32_t            find(PeerChunks* pc, bool highPriority);
-
-  bool                is_wanted(uint32_t index) const;
+  find_result         find(PeerChunks* pc);
 
   // Call this to set the index as being downloaded, finished etc,
   // thus ignored. Propably should find a better name for this.
@@ -65,9 +68,9 @@ public:
   bool                received_have_chunk(PeerChunks* pc, uint32_t index);
 
 private:
-  bool                search_linear(const Bitfield* bf, utils::PartialQueue* pq, const download_data::priority_ranges* ranges, uint32_t first, uint32_t last);
-  inline bool         search_linear_range(const Bitfield* bf, utils::PartialQueue* pq, uint32_t first, uint32_t last);
-  inline bool         search_linear_byte(utils::PartialQueue* pq, uint32_t index, Bitfield::value_type wanted);
+  bool                search_linear(const Bitfield* bf, utils::PartialQueue* pq, const download_data::priority_ranges* ranges, bool high_priority, uint32_t first, uint32_t last);
+  inline bool         search_linear_range(const Bitfield* bf, utils::PartialQueue* pq, bool high_priority, uint32_t first, uint32_t last);
+  inline bool         search_linear_byte(utils::PartialQueue* pq, bool high_priority, uint32_t index, Bitfield::value_type wanted);
 
 //   inline uint32_t     search_rarest(const Bitfield* bf, priority_ranges* ranges, uint32_t first, uint32_t last);
 //   inline uint32_t     search_rarest_range(const Bitfield* bf, uint32_t first, uint32_t last);
@@ -79,9 +82,10 @@ private:
 
   ChunkStatistics*    m_statistics;
 
-  utils::PartialQueue m_sharedQueue;
+  utils::PartialQueue m_shared_queue;
 
   uint32_t            m_position;
+  int64_t             m_high_selection_balance{};
 };
 
 } // namespace torrent

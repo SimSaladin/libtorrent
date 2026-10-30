@@ -11,8 +11,6 @@ class Content;
 class DownloadWrapper;
 class Path;
 
-using EncodingList = std::list<std::string>;
-
 class DownloadConstructor {
 public:
   void                initialize(Object& b);
@@ -20,7 +18,6 @@ public:
   void                parse_tracker(const Object& b);
 
   void                set_download(DownloadWrapper* d)         { m_download = d; }
-  void                set_encoding_list(const EncodingList* e) { m_encodingList = e; }
 
 private:
   void                parse_name(const Object& b);
@@ -30,19 +27,12 @@ private:
   void                add_tracker_group(const Object& b);
   void                add_tracker_single(const Object& b, int group);
 
-  static bool         is_valid_path_element(const Object& b);
-  static bool         is_invalid_path_element(const Object& b) { return !is_valid_path_element(b); }
-
   void                parse_single_file(const Object& b, uint32_t chunkSize);
   void                parse_multi_files(const Object& b, uint32_t chunkSize);
 
-  static Path         create_path(const Object::list_type& plist, const std::string& enc);
-  inline Path         choose_path(std::list<Path>* pathList);
+  static Path         create_path(const Object::list_type& plist);
 
   DownloadWrapper*    m_download{};
-  const EncodingList* m_encodingList{};
-
-  std::string         m_defaultEncoding;
 };
 
 } // namespace torrent

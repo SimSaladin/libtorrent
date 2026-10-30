@@ -3,8 +3,9 @@
 #include "download/download_constructor.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
+#include <limits>
+#include <ranges>
 
 #include "manager.h"
 #include "download/download_wrapper.h"
@@ -12,28 +13,58 @@
 #include "torrent/exceptions.h"
 #include "torrent/data/file.h"
 #include "torrent/data/file_list.h"
+#include "torrent/runtime/client_config.h"
 #include "torrent/utils/string_manip.h"
 #include "tracker/tracker_list.h"
 
 namespace torrent {
 
-static bool
-download_constructor_is_single_path(Object::map_type::const_reference v) {
-  return v.first.rfind("name.", 0) == 0 && v.second.is_string();
+namespace {
+
+std::string
+sanitize_file_name(std::string name, const char* context) {
+  auto count = std::count(name.begin(), name.end(), '/');
+
+  if (count == 0)
+    return name;
+
+  auto replace_slash = runtime::client_config()->file_name_replace_slash();
+
+  if (replace_slash.empty())
+    throw input_error("Invalid torrent file, " + std::string(context) + " contains '/' but 'system.file_name.replace_slash' is empty.");
+
+  std::string result;
+  result.reserve(name.size() + count * (replace_slash.size() - 1));
+
+  for (char c : name) {
+    if (c == '/')
+      result += replace_slash;
+    else
+      result += c;
+  }
+
+  return result;
 }
 
-static bool
-download_constructor_is_multi_path(Object::map_type::const_reference v) {
-  return v.first.rfind("path.", 0) == 0 && v.second.is_list();
+bool
+any_of_shared_prefix(const std::vector<FileList::split_type>& split_list) {
+  std::vector<const Path*> sorted_paths;
+  sorted_paths.reserve(split_list.size());
+
+  for (const auto& split : split_list)
+    sorted_paths.push_back(&std::get<1>(split));
+
+  std::sort(sorted_paths.begin(), sorted_paths.end(), &Path::compare_less);
+
+  return std::adjacent_find(sorted_paths.begin(), sorted_paths.end(), &Path::is_prefix) != sorted_paths.end();
 }
+
+} // namespace
 
 void
 DownloadConstructor::initialize(Object& b) {
   if (!b.has_key_map("info") && b.has_key_string("magnet-uri"))
     parse_magnet_uri(b, b.get_key_string("magnet-uri"));
-
-  if (b.has_key_string("encoding"))
-    m_defaultEncoding = b.get_key_string("encoding");
 
   if (b.has_key_value("creation date"))
     m_download->info()->set_creation_date(b.get_key_value("creation date"));
@@ -46,36 +77,30 @@ DownloadConstructor::initialize(Object& b) {
   parse_info(b.get_key("info"));
 }
 
-// Currently using a hack of the path thingie to extract the correct
-// torrent name.
 void
 DownloadConstructor::parse_name(const Object& b) {
-  if (is_invalid_path_element(b.get_key("name")))
-    throw input_error("Bad torrent file, \"name\" is an invalid path name.");
+  auto [original_name, sanitized_name] = [b]() {
+      if (runtime::client_config()->file_name_allow_legacy_utf8() && b.has_key_string("name.utf-8")) {
+        auto original_name  = b.get_key_string("name.utf-8");
+        auto sanitized_name = sanitize_file_name(original_name, "dict-key \"name.utf-8\"");
+        return std::make_pair(original_name, sanitized_name);
 
-  std::list<Path> pathList;
+      } else {
+        auto original_name  = b.get_key_string("name");
+        auto sanitized_name = sanitize_file_name(original_name, "dict-key \"name\"");
+        return std::make_pair(original_name, sanitized_name);
+      }
+  }();
 
-  pathList.emplace_back();
-  pathList.back().set_encoding(m_defaultEncoding);
-  pathList.back().push_back(b.get_key_string("name"));
+  if (!Path::is_valid_component(sanitized_name))
+    throw input_error("Bad torrent file, dict-key \"name\" contains invalid characters or is empty.");
 
-  for (const auto& map : b.as_map()) {
-    if (download_constructor_is_single_path(map)) {
-      pathList.emplace_back();
-      pathList.back().set_encoding(map.first.substr(sizeof("name.") - 1));
-      pathList.back().push_back(map.second.as_string());
-    }
-  }
+  if (runtime::client_config()->torrent_name_use_sanitized())
+    m_download->info()->set_name(sanitized_name);
+  else
+    m_download->info()->set_name(original_name);
 
-  if (pathList.empty())
-    throw input_error("Bad torrent file, an entry has no valid name.");
-
-  Path name = choose_path(&pathList);
-
-  if (name.empty())
-    throw internal_error("DownloadConstructor::parse_name(...) Ended up with an empty Path.");
-
-  m_download->info()->set_name(name.front());
+  m_download->info()->set_name_sanitized(sanitized_name);
 }
 
 void
@@ -94,6 +119,9 @@ DownloadConstructor::parse_info(const Object& b) {
     m_download->info()->set_flags(DownloadInfo::flag_meta_download);
 
   if (m_download->info()->is_meta_download()) {
+    if (b.has_key("length") || b.has_key("files"))
+      throw input_error("Meta-download has file entries.");
+
     if (b.get_key_string("pieces").length() != HashString::size_data)
       throw input_error("Meta-download has invalid piece data.");
 
@@ -101,10 +129,12 @@ DownloadConstructor::parse_info(const Object& b) {
     parse_single_file(b, chunkSize);
 
   } else {
-    chunkSize = b.get_key_value("piece length");
+    int64_t piece_length = b.get_key_value("piece length");
 
-    if (chunkSize <= (1 << 10) || chunkSize > (512 << 20))
+    if (piece_length <= (1 << 10) || piece_length > (512 << 20))
       throw input_error("Torrent has an invalid \"piece length\".");
+
+    chunkSize = piece_length;
   }
 
   if (b.has_key("length")) {
@@ -112,7 +142,8 @@ DownloadConstructor::parse_info(const Object& b) {
 
   } else if (b.has_key("files")) {
     parse_multi_files(b.get_key("files"), chunkSize);
-    fileList->set_root_dir("./" + m_download->info()->name());
+
+    fileList->set_root_dir("./" + sanitize_file_name(m_download->info()->name().str(), "dict-key \"name\" or \"name.utf-8\""));
 
   } else if (!m_download->info()->is_meta_download()) {
     throw input_error("Torrent must have either length or files entry.");
@@ -179,44 +210,21 @@ DownloadConstructor::add_tracker_single(const Object& b, int group) {
   m_download->main()->tracker_list()->insert_url(group, utils::trim_spaces_str(b.as_string()));
 }
 
-bool
-DownloadConstructor::is_valid_path_element(const Object& b) {
-  return
-    b.is_string() &&
-    b.as_string() != "." &&
-    b.as_string() != ".." &&
-    std::find(b.as_string().begin(), b.as_string().end(), '/') == b.as_string().end() &&
-    std::find(b.as_string().begin(), b.as_string().end(), '\0') == b.as_string().end();
-}
-
 void
 DownloadConstructor::parse_single_file(const Object& b, uint32_t chunkSize) {
-  if (is_invalid_path_element(b.get_key("name")))
-    throw input_error("Bad torrent file, \"name\" is an invalid path name.");
+  int64_t length = chunkSize == 1 ? 1 : b.get_key_value("length");
+
+  if (length < 0)
+    throw input_error("Bad torrent file, invalid length for file.");
 
   FileList* fileList = m_download->main()->file_list();
-  fileList->initialize(chunkSize == 1 ? 1 : b.get_key_value("length"), chunkSize);
+  fileList->initialize(length, chunkSize);
   fileList->set_multi_file(false);
 
-  std::list<Path> pathList;
+  Path path;
+  path.push_back_component(m_download->info()->name_sanitized());
 
-  pathList.emplace_back();
-  pathList.back().set_encoding(m_defaultEncoding);
-  pathList.back().push_back(b.get_key_string("name"));
-
-  for (const auto& map : b.as_map()) {
-    if (!download_constructor_is_single_path(map))
-      continue;
-
-    pathList.emplace_back();
-    pathList.back().set_encoding(map.first.substr(sizeof("name.") - 1));
-    pathList.back().push_back(map.second.as_string());
-  }
-
-  if (pathList.empty())
-    throw input_error("Bad torrent file, an entry has no valid filename.");
-
-  *fileList->front()->mutable_path() = choose_path(&pathList);
+  *fileList->front()->mutable_path() = path;
   fileList->update_paths(fileList->begin(), fileList->end());
 }
 
@@ -229,25 +237,24 @@ DownloadConstructor::parse_multi_files(const Object& b, uint32_t chunk_size) {
     throw input_error("Bad torrent file, entry has no files.");
 
   int64_t torrent_size = 0;
+
   std::vector<FileList::split_type> split_list;
   split_list.reserve(object_list.size());
 
   for (const auto& object : object_list) {
-    std::list<Path> path_list;
+    Path path;
 
-    if (object.has_key_list("path"))
-      path_list.push_back(create_path(object.get_key_list("path"), m_defaultEncoding));
+    if (runtime::client_config()->file_name_allow_legacy_utf8() && object.has_key_list("path.utf-8"))
+      path = create_path(object.get_key_list("path.utf-8"));
+    else if (object.has_key_list("path"))
+      path = create_path(object.get_key_list("path"));
 
-    for (const auto& path : object.as_map())
-      if (download_constructor_is_multi_path(path))
-        path_list.push_back(create_path(path.second.as_list(), path.first.substr(sizeof("path.") - 1)));
-
-    if (path_list.empty())
+    if (path.empty())
       throw input_error("Bad torrent file, an entry has no valid filename.");
 
     int64_t length = object.get_key_value("length");
 
-    if (length < 0 || torrent_size + length < 0)
+    if (length < 0 || length > std::numeric_limits<int64_t>::max() - torrent_size)
       throw input_error("Bad torrent file, invalid length for file.");
 
     torrent_size += length;
@@ -259,8 +266,11 @@ DownloadConstructor::parse_multi_files(const Object& b, uint32_t chunk_size) {
         attr_flags |= File::flag_attr_padding;
     }
 
-    split_list.emplace_back(length, choose_path(&path_list), attr_flags);
+    split_list.emplace_back(length, path, attr_flags);
   }
+
+  if (any_of_shared_prefix(split_list))
+    throw input_error("Bad torrent file, a file path is a duplicate or the prefix of another.");
 
   FileList* file_list = m_download->main()->file_list();
   file_list->set_multi_file(true);
@@ -270,46 +280,41 @@ DownloadConstructor::parse_multi_files(const Object& b, uint32_t chunk_size) {
   file_list->update_paths(file_list->begin(), file_list->end());
 }
 
-inline Path
-DownloadConstructor::create_path(const Object::list_type& plist, const std::string& enc) {
-  // Make sure we are given a proper file path.
-  if (plist.empty())
-    throw input_error("Bad torrent file, \"path\" has zero entries.");
+Path
+DownloadConstructor::create_path(const Object::list_type& plist) {
+  auto view = [&plist]() {
+      if (!plist.empty() && plist.front().as_string().empty())
+        return plist | std::views::drop(1);
 
-  if (std::any_of(plist.begin(), plist.end(), &DownloadConstructor::is_invalid_path_element))
-    throw input_error("Bad torrent file, \"path\" has zero entries or a zero length entry.");
+      return plist | std::views::drop(0);
+    }();
+
+  if (view.empty())
+    throw input_error("Bad torrent file, \"path\" has zero entries or only an empty entry.");
 
   Path p;
-  p.set_encoding(enc);
 
-  std::transform(plist.begin(), plist.end(), std::back_inserter(p), std::mem_fn(&Object::as_string_c));
+  for (const auto& path : view) {
+    auto sanitized_name = sanitize_file_name(path.as_string(), "a value in dict-key \"path\"");
+
+    if (!Path::is_valid_component(sanitized_name))
+      throw input_error("Bad torrent file, a value in dict-key \"path\" contains invalid characters or is empty.");
+
+    p.push_back(sanitized_name);
+  }
 
   return p;
 }
 
-inline Path
-DownloadConstructor::choose_path(std::list<Path>* pathList) {
-  for (const auto& encoding : *m_encodingList) {
-    auto itr = std::find_if(pathList->begin(), pathList->end(), [&encoding](const Path& p) {
-      return strcasecmp(p.encoding().c_str(), encoding.c_str()) == 0;
-    });
-
-    if (itr != pathList->end())
-      pathList->splice(pathList->begin(), *pathList, itr);
-  }
-
-  return pathList->front();
-}
-
 static const char*
-parse_base32_sha1(const char* pos, HashString& hash) {
+parse_base32_sha1(const char* pos, const char* end, HashString& hash) {
   HashString::iterator hashItr = hash.begin();
 
   static constexpr int base_shift = 8+8-5;
   int shift = base_shift;
   uint16_t decoded = 0;
 
-  while (*pos) {
+  while (pos != end) {
     char c = *pos++;
     uint16_t value;
 
@@ -343,34 +348,37 @@ parse_base32_sha1(const char* pos, HashString& hash) {
 
 void
 DownloadConstructor::parse_magnet_uri(Object& b, const std::string& uri) {
-  if (std::strncmp(uri.c_str(), "magnet:?", 8))
+  if (uri.compare(0, 8, "magnet:?") != 0)
     throw input_error("Invalid magnet URI.");
 
   const char* pos = uri.c_str() + 8;
+  const char* end = uri.c_str() + uri.size();
 
   Object trackers(Object::create_list());
   HashString hash;
   bool hashValid = false;
 
-  while (*pos) {
+  while (pos != end) {
     const char* tagStart = pos;
 
-    while (*pos != '=') {
-      if (!*pos++)
-        break;
-    }
+    while (pos != end && *pos != '=')
+      pos++;
+
+    if (pos == end)
+      throw input_error("Invalid magnet URI.");
 
     raw_string tag(tagStart, pos - tagStart);
     pos++;
 
-    // hash may be base32 encoded (optional in BEP 0009 and common practice)
-    if (raw_bencode_equal_c_str(tag, "xt")) {
-      if (strncmp(pos, "urn:btih:", 9))
-        throw input_error("Invalid magnet URI.");
+    // skip exact topics other than urn:btih, such as the urn:btmh a hybrid torrent adds
+    bool is_btih = raw_bencode_equal_c_str(tag, "xt") &&
+                   end - pos >= 9 && std::memcmp(pos, "urn:btih:", 9) == 0;
 
+    // hash may be base32 encoded (optional in BEP 0009 and common practice)
+    if (is_btih) {
       pos += 9;
 
-      const char* nextPos = parse_base32_sha1(pos, hash);
+      const char* nextPos = parse_base32_sha1(pos, end, hash);
 
       if (nextPos != NULL) {
         pos       = nextPos;
@@ -382,12 +390,19 @@ DownloadConstructor::parse_magnet_uri(Object& b, const std::string& uri) {
     // everything else, including sometimes the hash, is url encoded.
     std::string decoded;
 
-    while (*pos) {
+    while (pos != end) {
       char c = *pos++;
       if (c == '%') {
-        if (sscanf(pos, "%02hhx", &c) != 1)
+        if (end - pos < 2)
           throw input_error("Invalid magnet URI.");
 
+        char high = utils::hex_to_value_or_error(pos[0]);
+        char low  = utils::hex_to_value_or_error(pos[1]);
+
+        if (high == static_cast<char>(-1) || low == static_cast<char>(-1))
+          throw input_error("Invalid magnet URI.");
+
+        c = (high << 4) | low;
         pos += 2;
 
       } else if (c == '&') {
@@ -397,7 +412,7 @@ DownloadConstructor::parse_magnet_uri(Object& b, const std::string& uri) {
       decoded.push_back(c);
     }
 
-    if (raw_bencode_equal_c_str(tag, "xt")) {
+    if (is_btih) {
       if (decoded.length() == torrent::HashString::size_data) {
         // url-encoded hash as per magnet URN specs
 

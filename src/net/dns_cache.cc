@@ -8,6 +8,7 @@
 #include "net/dns_buffer.h"
 #include "torrent/exceptions.h"
 #include "torrent/net/socket_address.h"
+#include "torrent/system/types.h"
 #include "torrent/utils/log.h"
 
 #define LT_LOG(log_fmt, ...)                                            \
@@ -391,7 +392,7 @@ DnsCache::process_failure(const std::string& hostname, int family, int error) {
       default:
         reset_sin_failed(itr->second.get(), current_time);
 
-        LT_LOG("added new cache entry with failed update : hostname:%s family:AF_INET error:%s", hostname.c_str(), gai_enum_error(error));
+        LT_LOG("added new cache entry with failed update : hostname:%s family:AF_INET error:%s", hostname.c_str(), system::gai_enum_error(error));
         return;
       };
     }
@@ -408,7 +409,7 @@ DnsCache::process_failure(const std::string& hostname, int family, int error) {
       default:
         reset_sin6_failed(itr->second.get(), current_time);
 
-        LT_LOG("added new cache entry with failed update : hostname:%s family:AF_INET6 error:%s", hostname.c_str(), gai_enum_error(error));
+        LT_LOG("added new cache entry with failed update : hostname:%s family:AF_INET6 error:%s", hostname.c_str(), system::gai_enum_error(error));
         return;
       };
     }
@@ -433,7 +434,7 @@ DnsCache::process_failure(const std::string& hostname, int family, int error) {
     default:
       reset_sin_failed(itr->second.get(), current_time);
 
-      LT_LOG("updated cache entry with failed update : hostname:%s family:AF_INET error:%s", hostname.c_str(), gai_enum_error(error));
+      LT_LOG("updated cache entry with failed update : hostname:%s family:AF_INET error:%s", hostname.c_str(), system::gai_enum_error(error));
       return;
     };
   }
@@ -453,7 +454,7 @@ DnsCache::process_failure(const std::string& hostname, int family, int error) {
     default:
       reset_sin6_failed(itr->second.get(), current_time);
 
-      LT_LOG("updated cache entry with failed update : hostname:%s family:AF_INET6 error:%s", hostname.c_str(), gai_enum_error(error));
+      LT_LOG("updated cache entry with failed update : hostname:%s family:AF_INET6 error:%s", hostname.c_str(), system::gai_enum_error(error));
       return;
     };
   }
@@ -531,6 +532,9 @@ DnsCache::cull_stale_entries() {
     LT_LOG("culling stale cache entry : hostname:%s family:AF_INET sin:%s",
            info.entry_itr->first.c_str(), sin_pretty_or_empty(entry->sin_addr.get()).c_str());
 
+    if (entry->sin6_info.staleness_itr != m_sin6_staleness.end())
+      m_sin6_staleness.erase(entry->sin6_info.staleness_itr);
+
     m_entries.erase(info.entry_itr);
     m_sin_staleness.pop_front();
   }
@@ -544,6 +548,9 @@ DnsCache::cull_stale_entries() {
 
     LT_LOG("culling stale cache entry : hostname:%s family:AF_INET6 sin6:%s",
            info.entry_itr->first.c_str(), sin6_pretty_or_empty(entry->sin6_addr.get()).c_str());
+
+    if (entry->sin_info.staleness_itr != m_sin_staleness.end())
+      m_sin_staleness.erase(entry->sin_info.staleness_itr);
 
     m_entries.erase(info.entry_itr);
     m_sin6_staleness.pop_front();
@@ -559,7 +566,7 @@ DnsCache::queue_resolve(void* requester, const std::string& hostname, int family
 void
 DnsCache::update_stale_info(const char* reason, void* requester, const std::string& hostname, int family, DnsCacheInfo& info) {
   LT_LOG_REQUESTER("stale cache entry with %s, retrying in background : hostname:%s family:%s",
-                   reason, hostname.c_str(), family_str(family));
+                   reason, hostname.c_str(), system::sa_family_enum(family));
 
   ThreadNet::thread_net()->dns_buffer()->resolve(this, hostname, family, []( auto, int, auto, int) {});
   info.updating = true;

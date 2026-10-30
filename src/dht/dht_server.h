@@ -10,7 +10,10 @@
 #include "net/socket_datagram.h"
 #include "torrent/hash_string.h"
 #include "torrent/object_raw_bencode.h"
-#include "torrent/utils/scheduler.h"
+#include "torrent/system/scheduler.h"
+
+// TODO: Remove.
+#include "net/address_list.h"
 
 namespace torrent {
 
@@ -51,10 +54,10 @@ public:
   void                find_node(const DhtBucket& contacts, const HashString& target);
 
   // Do DHT announce, starting with the given contacts.
-  void                announce(const DhtBucket& contacts, const HashString& infoHash, TrackerDht* tracker);
+  void                announce(const DhtBucket& contacts, const HashString& infoHash, std::weak_ptr<TrackerDht> tracker);
 
   // Cancel given announce for given tracker, or all matching announces if info/tracker NULL.
-  void                cancel_announce(const HashString* info_hash, const TrackerDht* tracker);
+  void                cancel_announce(const HashString& info_hash, std::weak_ptr<TrackerDht> tracker);
 
   // Called every 15 minutes.
   void                update();
@@ -72,6 +75,11 @@ private:
   static constexpr int dht_error_server     = 202;
   static constexpr int dht_error_protocol   = 203;
   static constexpr int dht_error_bad_method = 204;
+
+  // Bound work and state created from a single readable socket event.
+  static constexpr unsigned int max_read_datagrams = 64;
+  static constexpr size_t       max_reply_packets  = 1024;
+  static constexpr size_t       max_transactions   = 1024;
 
   struct [[gnu::packed]] compact_node_info {
     char                 _id[20];
@@ -142,7 +150,7 @@ private:
   packet_queue        m_lowQueue;
   transaction_map     m_transactions;
 
-  utils::SchedulerEntry m_task_timeout;
+  system::SchedulerEntry m_task_timeout;
 
   unsigned int        m_queriesReceived{};
   unsigned int        m_queriesSent{};

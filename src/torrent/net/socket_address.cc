@@ -60,22 +60,22 @@ sin6_make_addr32(uint32_t addr0, uint32_t addr1, uint32_t addr2, uint32_t addr3)
 
 bool
 sa_is_unspec(const sockaddr* sa) {
-  return sa != NULL && sa->sa_family == AF_UNSPEC;
+  return sa != nullptr && sa->sa_family == AF_UNSPEC;
 }
 
 bool
 sa_is_inet(const sockaddr* sa) {
-  return sa != NULL && sa->sa_family == AF_INET;
+  return sa != nullptr && sa->sa_family == AF_INET;
 }
 
 bool
 sa_is_inet6(const sockaddr* sa) {
-  return sa != NULL && sa->sa_family == AF_INET6;
+  return sa != nullptr && sa->sa_family == AF_INET6;
 }
 
 bool
 sa_is_inet_inet6(const sockaddr* sa) {
-  return sa != NULL && (sa->sa_family == AF_INET || sa->sa_family == AF_INET6);
+  return sa != nullptr && (sa->sa_family == AF_INET || sa->sa_family == AF_INET6);
 }
 
 bool
@@ -122,6 +122,58 @@ sin_is_broadcast(const sockaddr_in* sa) {
 }
 
 bool
+sa_is_loopback(const sockaddr* sa) {
+  switch (sa->sa_family) {
+  case AF_INET:
+    return sin_is_loopback(reinterpret_cast<const sockaddr_in*>(sa));
+  case AF_INET6:
+    if (sa_is_v4mapped(sa))
+      return reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr.s6_addr[12] == 127;
+
+    return sin6_is_loopback(reinterpret_cast<const sockaddr_in6*>(sa));
+  default:
+    return false;
+  }
+}
+
+bool
+sin_is_loopback(const sockaddr_in* sa) {
+  return (ntohl(sa->sin_addr.s_addr) >> 24) == 127;
+}
+
+bool
+sin6_is_loopback(const sockaddr_in6* sa) {
+  return IN6_IS_ADDR_LOOPBACK(&sa->sin6_addr);
+}
+
+bool
+sa_is_link_local(const sockaddr* sa) {
+  switch (sa->sa_family) {
+  case AF_INET:
+    return sin_is_link_local(reinterpret_cast<const sockaddr_in*>(sa));
+  case AF_INET6:
+    if (sa_is_v4mapped(sa)) {
+      const uint8_t* v4 = reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr.s6_addr + 12;
+      return v4[0] == 169 && v4[1] == 254;
+    }
+
+    return sin6_is_link_local(reinterpret_cast<const sockaddr_in6*>(sa));
+  default:
+    return false;
+  }
+}
+
+bool
+sin_is_link_local(const sockaddr_in* sa) {
+  return (ntohl(sa->sin_addr.s_addr) & 0xffff0000) == 0xa9fe0000;
+}
+
+bool
+sin6_is_link_local(const sockaddr_in6* sa) {
+  return IN6_IS_ADDR_LINKLOCAL(&sa->sin6_addr) || IN6_IS_ADDR_MC_LINKLOCAL(&sa->sin6_addr);
+}
+
+bool
 sa_is_v4mapped(const sockaddr* sa) {
   return sa != nullptr && sa->sa_family == AF_INET6 && sin6_is_v4mapped(reinterpret_cast<const sockaddr_in6*>(sa));
 }
@@ -145,8 +197,7 @@ sa_length(const sockaddr* sa) {
     return sizeof(sockaddr_in);
   case AF_INET6:
     return sizeof(sockaddr_in6);
-  case AF_UNIX:
-    return sizeof(sockaddr_un);
+  // case AF_UNIX:
   default:
     throw internal_error("torrent::sa_length() sockaddr is not a valid family");
   }
@@ -206,7 +257,7 @@ sa_make_unix(const std::string& pathname) {
 
 sa_unique_ptr
 sa_convert(const sockaddr* sa) {
-  if (sa == NULL)
+  if (sa == nullptr)
     return sa_make_unspec();
 
   switch(sa->sa_family) {
@@ -462,7 +513,7 @@ sa_clear_inet6(sockaddr_in6* sa) {
 
 uint16_t
 sa_port(const sockaddr* sa) {
-  if (sa == NULL)
+  if (sa == nullptr)
     return 0;
 
   switch(sa->sa_family) {
@@ -638,7 +689,7 @@ std::string
 sin_addr_str(const sockaddr_in* sa) {
   char buffer[INET_ADDRSTRLEN];
 
-  if (inet_ntop(AF_INET, &sa->sin_addr, buffer, INET_ADDRSTRLEN) == NULL)
+  if (inet_ntop(AF_INET, &sa->sin_addr, buffer, INET_ADDRSTRLEN) == nullptr)
     throw internal_error("torrent::sin_addr_str() inet_ntop failed");
 
   return buffer;
@@ -649,7 +700,7 @@ std::string
 sin6_addr_str(const sockaddr_in6* sa) {
   char buffer[INET6_ADDRSTRLEN];
 
-  if (inet_ntop(AF_INET6, &sa->sin6_addr, buffer, INET6_ADDRSTRLEN) == NULL)
+  if (inet_ntop(AF_INET6, &sa->sin6_addr, buffer, INET6_ADDRSTRLEN) == nullptr)
     throw internal_error("torrent::sin6_addr_str() inet_ntop failed");
 
   return buffer;
@@ -718,6 +769,10 @@ sin6_pretty_or_empty(const sockaddr_in6* sa) {
   return result;
 }
 
+//
+// Other types:
+//
+
 c_sa_shared_ptr
 sa_lookup_address(const std::string& address_str, int family) {
   if (address_str.empty())
@@ -746,6 +801,77 @@ sa_lookup_address(const std::string& address_str, int family) {
   }
 }
 
+// Returns ptr if numeric of family, if numeric of other family return nullptr+false, else nullptr+true.
+
+std::tuple<sa_unique_ptr,bool>
+sa_lookup_numeric(const std::string& address_str, int family) {
+  auto [sin, sin6] = try_lookup_numeric(address_str, AF_UNSPEC);
+
+  switch (family) {
+  case AF_UNSPEC:
+    if (sin)
+      return {sa_copy_in(sin.get()), true};
+    if (sin6)
+      return {sa_copy_in6(sin6.get()), true};
+
+    return {nullptr, true};
+
+  case AF_INET:
+    if (sin)
+      return {sa_copy_in(sin.get()), true};
+    if (sin6)
+      return {nullptr, false};
+
+    return {nullptr, true};
+
+  case AF_INET6:
+    if (sin6)
+      return {sa_copy_in6(sin6.get()), true};
+    if (sin)
+      return {nullptr, false};
+
+    return {nullptr, true};
+
+  default:
+    throw internal_error("torrent::sa_lookup_numeric() invalid family");
+  }
+}
+
+sin46_shared_pair
+try_lookup_numeric(const std::string& hostname, int family) {
+  addrinfo  hints{};
+  addrinfo* result{};
+
+  hints.ai_family   = family;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags    = AI_NUMERICHOST;
+
+  auto ret = ::getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
+
+  if (ret == EAI_NONAME || ret == EAI_ADDRFAMILY)
+    return {nullptr, nullptr};
+
+  if (ret != 0)
+    throw internal_error("getaddrinfo failed: " + std::string(gai_strerror(ret)));
+
+  if (result->ai_family == AF_INET) {
+    sin_shared_ptr sin_addr = sin_copy(reinterpret_cast<sockaddr_in*>(result->ai_addr));
+    ::freeaddrinfo(result);
+
+    return {sin_addr, nullptr};
+  }
+
+  if (result->ai_family == AF_INET6) {
+    sin6_shared_ptr sin6_addr = sin6_copy(reinterpret_cast<sockaddr_in6*>(result->ai_addr));
+    ::freeaddrinfo(result);
+
+    return {nullptr, sin6_addr};
+  }
+
+  ::freeaddrinfo(result);
+  throw internal_error("getaddrinfo returned unsupported family");
+}
+
 sa_inet_union
 sa_inet_union_from_sa(const sockaddr* sa) {
   sa_inet_union su{};
@@ -762,19 +888,20 @@ sa_inet_union_from_sa(const sockaddr* sa) {
   }
 }
 
-const char*
-family_str(int family) {
-  switch (family) {
+void
+sa_copy_to_inet_union(const sockaddr* sa, sa_inet_union& u) {
+  switch (sa->sa_family) {
   case AF_UNSPEC:
-    return "AF_UNSPEC";
+    u.sa.sa_family = AF_UNSPEC;
+    return;
   case AF_INET:
-    return "AF_INET";
+    u.inet = *reinterpret_cast<const sockaddr_in*>(sa);
+    return;
   case AF_INET6:
-    return "AF_INET6";
-  case AF_UNIX:
-    return "AF_UNIX";
+    u.inet6 = *reinterpret_cast<const sockaddr_in6*>(sa);
+    return;
   default:
-    return "AF_UNKNOWN";
+    throw internal_error("torrent::sa_copy_to_inet_union() sockaddr is not unspec, inet or inet6");
   }
 }
 

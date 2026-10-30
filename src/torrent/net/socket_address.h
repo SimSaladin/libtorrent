@@ -19,6 +19,14 @@ bool sin6_is_any(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
 bool sa_is_broadcast(const sockaddr* sa) LIBTORRENT_EXPORT;
 bool sin_is_broadcast(const sockaddr_in* sa) LIBTORRENT_EXPORT;
 
+bool sa_is_loopback(const sockaddr* sa) LIBTORRENT_EXPORT;
+bool sin_is_loopback(const sockaddr_in* sa) LIBTORRENT_EXPORT;
+bool sin6_is_loopback(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
+
+bool sa_is_link_local(const sockaddr* sa) LIBTORRENT_EXPORT;
+bool sin_is_link_local(const sockaddr_in* sa) LIBTORRENT_EXPORT;
+bool sin6_is_link_local(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
+
 bool sa_is_v4mapped(const sockaddr* sa) LIBTORRENT_EXPORT;
 bool sin6_is_v4mapped(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
 
@@ -97,15 +105,12 @@ std::string sin_pretty_or_empty(const sockaddr_in* sa) LIBTORRENT_EXPORT;
 std::string sin6_pretty_str(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
 std::string sin6_pretty_or_empty(const sockaddr_in6* sa) LIBTORRENT_EXPORT;
 
-c_sa_shared_ptr sa_lookup_address(const std::string& address_str, int family) LIBTORRENT_EXPORT;
-
 //
 // Other types:
 //
 
 sa_inet_union sa_inet_union_from_sa(const sockaddr* sa) LIBTORRENT_EXPORT;
-
-const char*   family_str(int family) LIBTORRENT_EXPORT;
+void          sa_copy_to_inet_union(const sockaddr* sa, sa_inet_union& u) LIBTORRENT_EXPORT;
 
 bool          fd_sap_equal(const fd_sap_tuple& lhs, const fd_sap_tuple& rhs) LIBTORRENT_EXPORT;
 
@@ -133,6 +138,13 @@ inline bool sap_is_broadcast(const sa_unique_ptr& sap)        { return sa_is_bro
 inline bool sap_is_broadcast(const c_sa_unique_ptr& sap)      { return sa_is_broadcast(sap.get()); }
 inline bool sinp_is_broadcast(const sin_unique_ptr& sap)      { return sin_is_broadcast(sap.get()); }
 inline bool sinp_is_broadcast(const c_sin_unique_ptr& sap)    { return sin_is_broadcast(sap.get()); }
+
+inline bool sap_is_loopback(const sa_unique_ptr& sap)         { return sa_is_loopback(sap.get()); }
+inline bool sap_is_loopback(const c_sa_unique_ptr& sap)       { return sa_is_loopback(sap.get()); }
+inline bool sinp_is_loopback(const sin_unique_ptr& sinp)      { return sin_is_loopback(sinp.get()); }
+inline bool sinp_is_loopback(const c_sin_unique_ptr& sinp)    { return sin_is_loopback(sinp.get()); }
+inline bool sinp6_is_loopback(const sin6_unique_ptr& sin6p)   { return sin6_is_loopback(sin6p.get()); }
+inline bool sinp6_is_loopback(const c_sin6_unique_ptr& sin6p) { return sin6_is_loopback(sin6p.get()); }
 
 inline bool sap_is_v4mapped(const sa_unique_ptr& sap)         { return sa_is_v4mapped(sap.get()); }
 inline bool sap_is_v4mapped(const c_sa_unique_ptr& sap)       { return sa_is_v4mapped(sap.get()); }
@@ -207,6 +219,8 @@ inline std::string sinp_pretty_str(const sin_unique_ptr& sinp)      { return sin
 inline std::string sinp_pretty_str(const c_sin_unique_ptr& sinp)    { return sin_pretty_str(sinp.get()); }
 inline std::string sin6p_pretty_str(const sin6_unique_ptr& sin6p)   { return sin6_pretty_str(sin6p.get()); }
 inline std::string sin6p_pretty_str(const c_sin6_unique_ptr& sin6p) { return sin6_pretty_str(sin6p.get()); }
+
+inline sa_inet_union sa_inet_union_from_sap(const sa_unique_ptr& sap) { return sa_inet_union_from_sa(sap.get()); }
 
 //
 // Implementations:

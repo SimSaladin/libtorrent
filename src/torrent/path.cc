@@ -1,61 +1,65 @@
-// libTorrent - BitTorrent library
-// Copyright (C) 2005-2011, Jari Sundell
-//
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation; either version 2 of the License, or
-// (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-// 
-// You should have received a copy of the GNU General Public License
-// along with this program; if not, write to the Free Software
-// Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-//
-// In addition, as a special exception, the copyright holders give
-// permission to link the code of portions of this program with the
-// OpenSSL library under certain conditions as described in each
-// individual source file, and distribute linked combinations
-// including the two.
-//
-// You must obey the GNU General Public License in all respects for
-// all of the code used other than OpenSSL.  If you modify file(s)
-// with this exception, you may extend this exception to your version
-// of the file(s), but you are not obligated to do so.  If you do not
-// wish to do so, delete this exception statement from your version.
-// If you delete this exception statement from all source files in the
-// program, then also delete it here.
-//
-// Contact:  Jari Sundell <jaris@ifi.uio.no>
-//
-//           Skomakerveien 33
-//           3185 Skoppum, NORWAY
-
 #include "config.h"
-
-#include <algorithm>
 
 #include "path.h"
 
+#include <algorithm>
+
+#include "torrent/exceptions.h"
+
 namespace torrent {
+
+bool
+Path::is_prefix(const Path* prefix, const Path* path) {
+  return prefix->size() <= path->size() &&
+    std::equal(prefix->begin(), prefix->end(), path->begin(),
+               [](const auto& l, const auto& r) { return l.str() == r.str(); });
+}
+
+bool
+Path::is_valid_component(const std::string& name) {
+  if (name.empty())
+    return false;
+
+  if (name == "." || name == "..")
+    return false;
+
+  if (std::any_of(name.begin(), name.end(), [](char c) { return c == '/' || c == '\0'; }))
+    return false;
+
+  return true;
+}
 
 void
 Path::insert_path(iterator pos, const std::string& path) {
-  std::string::const_iterator first = path.begin();
-  std::string::const_iterator last;
+  if (std::find(path.begin(), path.end(), '\0') != path.end())
+    throw input_error("Invalid path, contains null character.");
+
+  auto first = path.begin();
 
   while (first != path.end()) {
-    pos = insert(pos, std::string(first, (last = std::find(first, path.end(), '/'))));
+    auto last = std::find(first, path.end(), '/');
+
+    pos = insert(pos, string_utf8::from_string(std::string(first, last)));
 
     if (last == path.end())
       return;
 
-    first = last;
-    first++;
+    first = last + 1;
   }
+}
+
+void
+Path::insert_component(iterator pos, const std::string& name) {
+  if (!is_valid_component(name))
+    throw input_error("Invalid path component name.");
+
+  insert(pos, string_utf8::from_string(name));
+}
+
+bool
+Path::compare_less(const Path* left, const Path* right) {
+  return std::lexicographical_compare(left->begin(), left->end(), right->begin(), right->end(),
+                                      [](const auto& l, const auto& r) { return l.str() < r.str(); });
 }
 
 std::string
@@ -67,7 +71,7 @@ Path::as_string() const {
 
   for (const auto& c : *this) {
     s += '/';
-    s += c;
+    s += c.str();
   }
 
   return s;

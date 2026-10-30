@@ -2,10 +2,11 @@
 #define LIBTORRENT_REQUEST_LIST_H
 
 #include <deque>
+#include <optional>
 #include <vector>
 
 #include "torrent/data/block_transfer.h"
-#include "torrent/utils/scheduler.h"
+#include "torrent/system/scheduler.h"
 #include "utils/instrumentation.h"
 #include "utils/queue_buckets.h"
 
@@ -77,13 +78,13 @@ public:
   size_t               choked_size() const                { return m_queues.queue_size(bucket_choked); }
 
   uint32_t             pipe_size() const;
-  uint32_t             calculate_pipe_size(uint32_t rate);
+  uint32_t             calculate_pipe_size(uint32_t rate, uint32_t max_size);
 
   Delegator*           delegator()                       { return m_delegator; }
   void                 set_delegator(Delegator* d)       { m_delegator = d; }
 
-  PeerChunks*          peer_chunks()                     { return m_peerChunks; }
-  void                 set_peer_chunks(PeerChunks* b)    { m_peerChunks = b; }
+  PeerChunks*          peer_chunks()                     { return m_peer_chunks; }
+  void                 set_peer_chunks(PeerChunks* b)    { m_peer_chunks = b; }
 
   BlockTransfer*       transfer()                        { return m_transfer; }
   const BlockTransfer* transfer() const                  { return m_transfer; }
@@ -97,20 +98,18 @@ private:
   void                 delay_process_unordered();
 
   Delegator*           m_delegator{};
-  PeerChunks*          m_peerChunks{};
+  PeerChunks*          m_peer_chunks{};
 
   BlockTransfer*       m_transfer{};
 
   queues_type          m_queues;
 
-  int32_t              m_affinity{-1};
+  std::optional<uint32_t> m_affinity;
 
-  std::chrono::microseconds m_last_choke{};
-  std::chrono::microseconds m_last_unchoke{};
   size_t                    m_last_unordered_position{0};
 
-  torrent::utils::SchedulerEntry m_delay_remove_choked;
-  torrent::utils::SchedulerEntry m_delay_process_unordered;
+  torrent::system::SchedulerEntry m_delay_remove_choked;
+  torrent::system::SchedulerEntry m_delay_process_unordered;
 };
 
 inline

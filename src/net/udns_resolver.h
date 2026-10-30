@@ -5,9 +5,9 @@
 #include <mutex>
 #include <string>
 
-#include "torrent/event.h"
 #include "torrent/net/types.h"
-#include "torrent/utils/scheduler.h"
+#include "torrent/system/event.h"
+#include "torrent/system/scheduler.h"
 
 struct dns_ctx;
 
@@ -16,7 +16,7 @@ namespace torrent::net {
 struct UdnsQuery;
 class  UdnsResolverInternal;
 
-class UdnsResolver : public Event {
+class UdnsResolver : public system::Event {
 public:
   using query_map = std::multimap<void*, std::unique_ptr<UdnsQuery>>;
 
@@ -25,7 +25,7 @@ public:
 
   const char*         type_name() const override { return "udns"; }
 
-  void                initialize(utils::Thread* thread);
+  void                initialize(system::Thread* thread);
   void                cleanup();
 
   // Callback must happen in thread_net and cannot call back into the resolver.
@@ -45,13 +45,10 @@ public:
 protected:
   friend class UdnsResolverInternal;
 
-  std::unique_ptr<UdnsQuery> erase_query(query_map::iterator itr);
-
   query_map::iterator        find_query_or_fail_unsafe(UdnsQuery* query);
 
   bool                try_resolve_numeric(std::unique_ptr<UdnsQuery>& query);
 
-  void                process_canceled();
   void                process_timeouts();
 
   static void         process_partial_result_unsafe(query_map::iterator itr);
@@ -59,12 +56,13 @@ protected:
 
   static bool         m_initialized;
 
-  utils::Thread*      m_thread{};
+  system::Thread*     m_thread{};
   ::dns_ctx*          m_ctx{};
 
-  utils::SchedulerEntry m_task_timeout;
+  system::SchedulerEntry m_task_timeout;
 
   std::mutex          m_mutex;
+
   query_map           m_queries_unsafe;
   query_map           m_malformed_queries_unsafe;
 };

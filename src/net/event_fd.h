@@ -1,0 +1,35 @@
+#ifndef LIBTORRENT_NET_EVENT_FD_H
+#define LIBTORRENT_NET_EVENT_FD_H
+
+#include <atomic>
+
+#include "torrent/system/event.h"
+
+namespace torrent::net {
+
+class EventFd : public system::Event {
+public:
+  EventFd() = default;
+  ~EventFd() override;
+
+  const char*         type_name() const override { return "eventfd"; }
+
+  void                add_to_poll();
+  void                remove_from_poll(system::Poll* poll);
+
+  void                send_signal();
+
+protected:
+  void                event_read() override;
+  void                event_write() override;
+  void                event_error() override;
+
+private:
+  align_cacheline
+
+  std::atomic<int>    m_safe_fd{-1};
+};
+
+} // namespace torrent::net
+
+#endif

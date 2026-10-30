@@ -12,9 +12,8 @@
 #include "torrent/peer/choke_status.h"
 #include "torrent/utils/log.h"
 
-// TODO: Add a different logging category.
-#define LT_LOG_THIS(log_fmt, ...)                                       \
-  lt_log_print_subsystem(LOG_TORRENT_INFO, "choke_queue", log_fmt, __VA_ARGS__);
+#define LT_LOG_DEBUG(log_fmt, ...)                          \
+  lt_log_print(LOG_TORRENT_DEBUG, "choke_queue : " log_fmt, __VA_ARGS__);
 
 namespace torrent {
 
@@ -93,7 +92,7 @@ choke_queue::retrieve_connections(group_stats gs, container_type* queued, contai
   for (auto entry : m_group_container) {
     unsigned int min_slots = std::min(entry->min_slots(), entry->max_slots());
 
-    lt_log_print(LOG_PEER_DEBUG, "Choke queue retrieve_connections; queued:%u unchoked:%u min_slots:%u max_slots:%u.",
+    lt_log_print(LOG_PEER_CHOKE_QUEUE, "Choke queue retrieve_connections; queued:%u unchoked:%u min_slots:%u max_slots:%u.",
                  (unsigned)entry->queued()->size(), (unsigned)entry->unchoked()->size(), min_slots, entry->max_slots());
 
     // Disable this after finding the flaw... ?
@@ -156,10 +155,13 @@ choke_queue::rebuild_containers(container_type* queued, container_type* unchoked
 
 void
 choke_queue::balance() {
-  LT_LOG_THIS("balancing queue: heuristics:%i currently_unchoked:%" PRIu32 " max_unchoked:%" PRIu32,
-              m_heuristics,
-              m_currently_unchoked,
-              m_maxUnchoked);
+  // A group that was never given its slots cannot be balanced; calling through
+  // an empty std::function would terminate the client.
+  if (!m_slotCanUnchoke)
+    return;
+
+  LT_LOG_DEBUG("balancing : heuristics:%i currently_unchoked:%" PRIu32 " max_unchoked:%" PRIu32,
+              m_heuristics, m_currently_unchoked, m_maxUnchoked);
 
   // Return if no balancing is needed. Don't return if is_unlimited()
   // as we might have just changed the value and have interested that
@@ -210,7 +212,7 @@ choke_queue::balance() {
   if (result != 0)
     m_slotUnchoke(result);
 
-  LT_LOG_THIS("balanced queue: adjust:%i can_unchoke:%i queued:%zu unchoked:%zu result:%i",
+  LT_LOG_DEBUG("balanced : adjust:%i can_unchoke:%i queued:%zu unchoked:%zu result:%i",
                adjust, can_unchoke, queued.size(), unchoked.size(), result);
 }
 
@@ -258,13 +260,13 @@ choke_queue::cycle(uint32_t quota) {
   quota = std::min(quota, m_maxUnchoked);
   quota = quota - std::min(quota, gs.now_unchoked);
 
-  uint32_t adjust = (unchoked.size() < quota) ? (quota - unchoked.size()) : 0; 
+  uint32_t adjust = (unchoked.size() < quota) ? (quota - unchoked.size()) : 0;
   adjust = std::max(adjust, alternate);
   adjust = std::min(adjust, quota);
 
   log_choke_changes_func_new(this, "cycle", quota, adjust);
 
-  lt_log_print(LOG_PEER_DEBUG, "Called cycle; quota:%u adjust:%i alternate:%i queued:%u unchoked:%u.",
+  lt_log_print(LOG_PEER_CHOKE_QUEUE, "Called cycle; quota:%u adjust:%i alternate:%i queued:%u unchoked:%u.",
                quota, adjust, alternate, (unsigned)queued.size(), (unsigned)unchoked.size());
 
   uint32_t unchoked_count = adjust_choke_range(queued.begin(), queued.end(), &queued, &unchoked, adjust, false);
@@ -277,7 +279,7 @@ choke_queue::cycle(uint32_t quota) {
 
   rebuild_containers(&queued, &unchoked); // Remove...
 
-  lt_log_print(LOG_PEER_DEBUG, "After cycle; queued:%u unchoked:%u unchoked_count:%i old_size:%i.",
+  lt_log_print(LOG_PEER_CHOKE_QUEUE, "After cycle; queued:%u unchoked:%u unchoked_count:%i old_size:%i.",
                (unsigned)queued.size(), (unsigned)unchoked.size(), unchoked_count, oldSize);
 
   return (static_cast<int>(unchoked.size()) - oldSize); // + gs.changed_unchoke
@@ -288,10 +290,12 @@ choke_queue::set_queued(PeerConnectionBase* pc, choke_status* base) {
   if (base->queued() || base->unchoked())
     return;
 
-  base->set_queued(true);
-
-  if (base->snubbed())
+  if (base->snubbed()) {
+    base->set_queued_snub(true);
     return;
+  }
+
+  base->set_queued(true);
 
   base->entry()->connection_queued(pc);
   modify_currently_queued(1);
@@ -307,13 +311,15 @@ choke_queue::set_queued(PeerConnectionBase* pc, choke_status* base) {
 
 void
 choke_queue::set_not_queued(PeerConnectionBase* pc, choke_status* base) {
+  if (base->snubbed()) {
+    base->set_queued_snub(false);
+    return;
+  }
+
   if (!base->queued())
     return;
 
   base->set_queued(false);
-
-  if (base->snubbed())
-    return;
 
   if (base->unchoked()) {
     m_slotConnection(pc, true);
@@ -342,6 +348,7 @@ choke_queue::set_snubbed(PeerConnectionBase* pc, choke_status* base) {
   base->entry()->connection_unqueued(pc);
   modify_currently_queued(-1);
 
+  base->set_queued_snub(true);
   base->set_queued(false);
 }
 
@@ -352,11 +359,14 @@ choke_queue::set_not_snubbed(PeerConnectionBase* pc, choke_status* base) {
 
   base->set_snubbed(false);
 
-  if (!base->queued())
+  if (!base->queued_snub())
     return;
 
   if (base->unchoked())
     throw internal_error("choke_queue::set_not_snubbed(...) base->unchoked().");
+
+  base->set_queued_snub(false);
+  base->set_queued(true);
 
   base->entry()->connection_queued(pc);
   modify_currently_queued(1);
@@ -388,6 +398,7 @@ choke_queue::disconnected(PeerConnectionBase* pc, choke_status* base) {
   }
 
   base->set_queued(false);
+  base->set_queued_snub(false);
 }
 
 // No need to do any choking as the next choke balancing will take
@@ -454,7 +465,7 @@ choke_manager_allocate_slots(choke_queue::iterator first, choke_queue::iterator 
 
       if (weights[itr] == 0 || target[itr].first >= s)
         continue;
-      
+
       uint32_t u = std::min(s - target[itr].first, base * weights[itr]);
 
       unchoke -= u;
@@ -543,7 +554,7 @@ choke_queue::adjust_choke_range(iterator first, iterator last,
 
     if ((itr - 1)->first > order_size)
       throw internal_error("choke_queue::adjust_choke_range(...) itr->first > std::distance((itr - 1)->second, itr->second).");
-    
+
     (itr - 1)->first += std::min(skipped, order_remaining);
     skipped          -= std::min(skipped, order_remaining);
 
@@ -578,7 +589,7 @@ choke_queue::adjust_choke_range(iterator first, iterator last,
 
       lt_log_print(LOG_INSTRUMENTATION_CHOKE,
                    "%p %i %s %p %X %llu %llu",
-                   this, 
+                   this,
                    0, //lf->last_update(),
                    (const char*)"unchoke" + 2*is_choke,
                    itr_adjust->connection,

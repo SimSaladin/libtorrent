@@ -1,7 +1,10 @@
 #include "config.h"
 
+#include <algorithm>
+
 #include "torrent/object_stream.h"
 
+#include <charconv>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -9,30 +12,38 @@
 
 #include "torrent/object.h"
 #include "torrent/object_static_map.h"
-#include "utils/functional.h"
+#include "torrent/utils/functional.h"
 #include "utils/sha1.h"
 
 namespace torrent {
 
 static bool
 object_read_string(std::istream* input, std::string& str) {
-  uint32_t size;
-  *input >> size;
+  uint32_t remaining;
+  *input >> remaining;
 
   if (input->fail() || input->get() != ':')
     return false;
 
-  try {
-  	str.resize(size);
-
-  } catch (const std::length_error&) {
+  // Limit to 32 MiB, used in many clients.
+  if (remaining > 1 << 25)
     return false;
-  }
 
-  for (auto& c : str) {
-    if (!input->good())
-      break;
-    c = input->get();
+  str.clear();
+
+  while (remaining != 0) {
+    // Read in chunks of 64 KiB, it is very unlikely that a bencode stream is really that large so
+    // we're assuming this fails at some point.
+    uint32_t read_size = std::min<uint32_t>(remaining, 1 << 16);
+
+    str.resize(str.size() + read_size);
+
+    input->read(str.data() + str.size() - read_size, read_size);
+
+    if (input->gcount() != read_size)
+      return false;
+
+    remaining -= read_size;
   }
 
   return !input->fail();
@@ -40,45 +51,42 @@ object_read_string(std::istream* input, std::string& str) {
 
 static const char*
 object_read_bencode_c_value(const char* first, const char* last, int64_t& value) {
-  if (first == last)
-    return first;
+  auto errc = std::from_chars(first, last, value, 10);
 
-  bool neg = false;
+  if (errc.ec != std::errc() || errc.ptr == first)
+    throw torrent::bencode_error("Invalid bencode data: invalid integer.");
+
+  if (errc.ptr >= last || *errc.ptr != 'e')
+    throw torrent::bencode_error("Invalid bencode data: missing 'e' terminator.");
 
   if (*first == '-') {
-    // Don't allow '-0', or '-' followed by non-numeral.
-    if ((first + 1) == last || *(first + 1) <= '0' || *(first + 1) > '9')
-      return first;
+    if (value == 0)
+      throw torrent::bencode_error("Invalid bencode data: negative zero is not allowed.");
 
-    neg = true;
-    first++;
+    if (*(first + 1) == '0' && errc.ptr != first + 2)
+      throw torrent::bencode_error("Invalid bencode data: leading zeros are not allowed.");
+
+  } else {
+    if (*first == '0' && errc.ptr != first + 1)
+      throw torrent::bencode_error("Invalid bencode data: leading zeros are not allowed.");
   }
 
-  value = 0;
-
-  while (first != last && *first >= '0' && *first <= '9')
-    value = value * 10 + (*first++ - '0');
-
-  if (neg)
-    value = -value;
-
-  return first;
+  return errc.ptr + 1;
 }
 
 raw_string
 object_read_bencode_c_string(const char* first, const char* last) {
-  // Set the most-significant bit so that if there are no numbers in
-  // the input it will fail the length check, while "0" will shift the
-  // bit out.
-  unsigned int length = 0x1U << (std::numeric_limits<unsigned int>::digits - 1);
+  uint32_t length{};
 
-  while (first != last && *first >= '0' && *first <= '9')
-    length = length * 10 + (*first++ - '0');
+  auto errc = std::from_chars(first, last, length, 10);
 
-  if (length + 1 > static_cast<unsigned int>(std::distance(first, last)) || length + 1 == 0 || *first++ != ':')
-    throw torrent::bencode_error("Invalid bencode data.");
+  if (errc.ec != std::errc() || errc.ptr == first || errc.ptr == last || *errc.ptr != ':')
+    throw torrent::bencode_error("Invalid bencode data: string length is invalid.");
 
-  return raw_string(first, length);
+  if (std::distance(errc.ptr + 1, last) < static_cast<std::ptrdiff_t>(length))
+    throw torrent::bencode_error("Invalid bencode data: string length exceeds available data.");
+
+  return raw_string(errc.ptr + 1, length);
 }
 
 // Could consider making this non-recursive, but they seldomly are
@@ -185,12 +193,7 @@ object_read_bencode_c(const char* first, const char* last, Object* object, uint3
   switch (*first) {
   case 'i':
     *object = Object::create_value();
-    first = object_read_bencode_c_value(first + 1, last, object->as_value());
-
-    if (first == last || *first++ != 'e')
-      break;
-
-    return first;
+    return object_read_bencode_c_value(first + 1, last, object->as_value());
 
   case 'l':
     if (++depth >= 1024)
@@ -292,8 +295,11 @@ object_read_bencode_skip_c(const char* first, const char* last) {
 
     switch (*first) {
     case 'i':
-      if (first != last && *++first == '-') {
-        if (first != last && *++first == '0')
+      if (++first == last)
+        throw torrent::bencode_error("Invalid bencode data.");
+
+      if (*first == '-') {
+        if (++first == last || *first == '0')
           throw torrent::bencode_error("Invalid bencode data.");
       }
 
@@ -431,19 +437,23 @@ object_write_bencode_c_value(object_write_data_t* output, int64_t src) {
   if (src == 0)
     return object_write_bencode_c_char(output, '0');
 
+  uint64_t value;
+
   if (src < 0) {
     object_write_bencode_c_char(output, '-');
-    src = -src;
+    value = -static_cast<uint64_t>(src);
+  } else {
+    value = static_cast<uint64_t>(src);
   }
 
   char buffer[20];
   char* first = buffer + 20;
 
   // We don't need locale support, so just do this directly.
-  while (src != 0) {
-    *--first = '0' + src % 10;
+  while (value != 0) {
+    *--first = '0' + value % 10;
 
-    src /= 10;
+    value /= 10;
   }
 
   object_write_bencode_c_string(output, first, 20 - std::distance(buffer, first));
@@ -701,7 +711,9 @@ static_map_read_bencode_c(const char* first,
         break;
       }
 
-      stack_itr++;
+      if (++stack_itr == stack + 8)
+        throw torrent::bencode_error("Invalid bencode data.");
+
       stack_itr->set_key_index((stack_itr - 1)->next_key, key_search.second, 2);
 
       current_key[key_search.second] = ':';
@@ -781,8 +793,8 @@ static_map_write_bencode_c_values(object_write_data_t* output,
 
     // Compare the keys to see if they are part of the same
     // dictionaries/lists.
-    unsigned int base_size = ::utils::count_base(first_key->key, first_key->key + stack_itr->next_key,
-                                                 prev_key, prev_key + stack_itr->next_key);
+    unsigned int base_size = utils::count_base(first_key->key, first_key->key + stack_itr->next_key,
+                                               prev_key, prev_key + stack_itr->next_key);
 
     while (base_size < stack_itr->next_key) {
       object_write_bencode_c_char(output, 'e');

@@ -20,10 +20,10 @@ const DhtMessage::key_list_type DhtMessage::base_type::keys;
 // DhtTransactionPacket:
 //
 
-DhtTransactionPacket::DhtTransactionPacket(const sockaddr* s, const DhtMessage& d, unsigned int id, std::shared_ptr<DhtTransaction> t)
+DhtTransactionPacket::DhtTransactionPacket(const sockaddr* s, const DhtMessage& d, unsigned int id, uint64_t transaction_key)
   : m_socket_address(sa_copy(s)),
     m_id(id),
-    m_transaction(std::move(t)) {
+    m_transaction_key(transaction_key) {
 
   build_buffer(d);
 }
@@ -83,10 +83,10 @@ DhtTransaction::key_match(key_type key, const sockaddr* sa) {
 // DhtTransactionSearch:
 //
 
-DhtTransactionSearch::DhtTransactionSearch(int quick_timeout, int timeout, dht::DhtSearch::const_accessor& node)
+DhtTransactionSearch::DhtTransactionSearch(int quick_timeout, int timeout, std::shared_ptr<dht::DhtSearch> search, dht::DhtSearch::const_accessor& node)
   : DhtTransaction(quick_timeout, timeout, node.node()->id(), node.node()->address()),
     m_node(node),
-    m_search(node.search()) {
+    m_search(std::move(search)) {
 
   if (!m_hasQuickTimeout)
     m_search->m_concurrency++;
@@ -112,9 +112,6 @@ void
 DhtTransactionSearch::complete(bool success) {
   if (m_node == m_search->end())
     throw internal_error("DhtTransactionSearch::complete() called multiple times.");
-
-  if (m_node.search() != m_search)
-    throw internal_error("DhtTransactionSearch::complete() called for node from wrong search.");
 
   if (!m_hasQuickTimeout)
     m_search->m_concurrency--;
